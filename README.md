@@ -1,5 +1,8 @@
 # Inventaire passif de domaines — Python
 
+English documentation: [README.en.md](README.en.md). English script:
+[`domain_inventory_en.py`](domain_inventory_en.py).
+
 Le script `domain_inventory.py` collecte des informations publiques et peut,
 sur demande explicite, lancer un scan Nmap TCP limité. Sa configuration peut
 être externalisée dans un fichier YAML.
