@@ -8,7 +8,7 @@ Le programme prend un ou plusieurs domaines en entrée et exécute quatre étape
 3. résolution DNS A/AAAA des noms trouvés ;
 4. attribution des IP à un ASN et à un opérateur apparent.
 
-Les résultats sont écrits dans sept CSV et un résumé JSON. Le script utilise
+Les résultats sont écrits dans huit CSV et un résumé JSON. Le script utilise
 uniquement la bibliothèque standard de Python et n'effectue ni brute force DNS,
 ni scan de ports, ni connexion aux services découverts.
 
@@ -26,12 +26,15 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -50,6 +53,10 @@ CDN_RE = re.compile(
 )
 COMMON_SUBDOMAIN_PREFIXES = ("ftp", "mail", "www", "webmail", "ns1", "ns2")
 DEFAULT_DKIM_SELECTORS = ("default", "selector1", "selector2", "google", "k1", "s1", "s2")
+DEFAULT_NMAP_PORTS = (
+    21, 22, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
+    1433, 3306, 3389, 5432, 8080, 8443,
+)
 
 
 def default_state_directory() -> Path:
@@ -779,6 +786,145 @@ def consolidate_dns_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, An
     )
 
 
+def parse_port_list(value: str) -> list[int]:
+    """Valide une liste de ports TCP séparés par des virgules.
+
+    Les plages et expressions Nmap ne sont volontairement pas acceptées afin de
+    maintenir un périmètre explicite et borné.
+    """
+    ports: set[int] = set()
+    for item in value.split(","):
+        item = item.strip()
+        if not item.isdigit():
+            raise argparse.ArgumentTypeError(
+                "les ports Nmap doivent être des entiers séparés par des virgules"
+            )
+        port = int(item)
+        if not 1 <= port <= 65535:
+            raise argparse.ArgumentTypeError(f"port hors limites: {port}")
+        ports.add(port)
+    if not ports:
+        raise argparse.ArgumentTypeError("au moins un port Nmap est requis")
+    if len(ports) > 100:
+        raise argparse.ArgumentTypeError("100 ports maximum pour le mode non invasif")
+    return sorted(ports)
+
+
+def parse_nmap_xml(ip: str, xml_text: str) -> list[dict[str, Any]]:
+    """Transforme la sortie XML Nmap en lignes CSV sans conserver le XML brut."""
+    root = ET.fromstring(xml_text)
+    rows: list[dict[str, Any]] = []
+    for host in root.findall("host"):
+        host_status = host.find("status")
+        host_state = host_status.get("state", "") if host_status is not None else ""
+        ports_node = host.find("ports")
+        if ports_node is None:
+            continue
+        for port in ports_node.findall("port"):
+            state = port.find("state")
+            service = port.find("service")
+            rows.append(
+                {
+                    "IP": ip,
+                    "HoteEtat": host_state,
+                    "Protocole": port.get("protocol", "tcp"),
+                    "Port": port.get("portid", ""),
+                    "Etat": state.get("state", "") if state is not None else "",
+                    "Raison": state.get("reason", "") if state is not None else "",
+                    "ServiceIndicatif": service.get("name", "") if service is not None else "",
+                    "Analyse": "TCP connect limité; aucune détection de version",
+                }
+            )
+    return rows
+
+
+def run_safe_nmap(
+    ips: Iterable[str],
+    ports: list[int],
+    nmap_path: str | None,
+    include_private: bool,
+    max_ips: int,
+) -> list[dict[str, Any]]:
+    """Exécute un scan Nmap TCP connect borné et sans techniques intrusives.
+
+    Le profil interdit implicitement les scripts NSE, la détection de versions,
+    la détection d'OS et l'UDP. Les IP sont traitées séquentiellement.
+    """
+    executable = nmap_path or shutil.which("nmap")
+    if not executable:
+        raise RuntimeError(
+            "Nmap est introuvable. Installez-le ou utilisez --nmap-path."
+        )
+    selected_ips = sorted(
+        set(ips), key=lambda value: (ipaddress.ip_address(value).version, ipaddress.ip_address(value))
+    )
+    rows: list[dict[str, Any]] = []
+    for index, ip in enumerate(selected_ips):
+        if index >= max_ips:
+            rows.append(
+                {
+                    "IP": ip, "HoteEtat": "ignoré", "Protocole": "tcp",
+                    "Port": "", "Etat": "non analysé", "Raison": "limite --nmap-max-ips atteinte",
+                    "ServiceIndicatif": "", "Analyse": "Aucun paquet envoyé",
+                }
+            )
+            continue
+        address = ipaddress.ip_address(ip)
+        if not include_private and not address.is_global:
+            rows.append(
+                {
+                    "IP": ip, "HoteEtat": "ignoré", "Protocole": "tcp",
+                    "Port": "", "Etat": "non analysé", "Raison": "IP non publique",
+                    "ServiceIndicatif": "", "Analyse": "Aucun paquet envoyé",
+                }
+            )
+            continue
+        command = [
+            executable,
+            "-sT", "-Pn", "-n", "-T3",
+            "--max-retries", "1",
+            "--host-timeout", "30s",
+            "--scan-delay", "50ms",
+            "-p", ",".join(str(port) for port in ports),
+            "-oX", "-",
+        ]
+        if address.version == 6:
+            command.append("-6")
+        command.append(ip)
+        print(f"Nmap limité {index + 1}/{min(len(selected_ips), max_ips)}: {ip}", flush=True)
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                check=False,
+                shell=False,
+            )
+            parsed = parse_nmap_xml(ip, completed.stdout) if completed.stdout.strip() else []
+            if parsed:
+                rows.extend(parsed)
+            else:
+                rows.append(
+                    {
+                        "IP": ip, "HoteEtat": "inconnu", "Protocole": "tcp",
+                        "Port": "", "Etat": "erreur", "Raison": completed.stderr.strip()[:500],
+                        "ServiceIndicatif": "", "Analyse": "Nmap sans résultat XML exploitable",
+                    }
+                )
+        except (subprocess.TimeoutExpired, ET.ParseError, OSError) as exc:
+            rows.append(
+                {
+                    "IP": ip, "HoteEtat": "inconnu", "Protocole": "tcp",
+                    "Port": "", "Etat": "erreur", "Raison": str(exc)[:500],
+                    "ServiceIndicatif": "", "Analyse": "Analyse interrompue sans nouvelle tentative",
+                }
+            )
+    return rows
+
+
 def resolve_name(name: str) -> dict[str, Any]:
     """Résout un nom en IPv4/IPv6 par le résolveur DNS configuré localement.
 
@@ -1000,6 +1146,35 @@ def main() -> int:
             "rdap (1 crédit/domaine) ou both (2 crédits/domaine)"
         ),
     )
+    parser.add_argument(
+        "--nmap",
+        action="store_true",
+        help=(
+            "Active le scan Nmap TCP connect limité. À utiliser uniquement sur "
+            "des IP que vous êtes autorisé à auditer."
+        ),
+    )
+    parser.add_argument(
+        "--nmap-ports",
+        type=parse_port_list,
+        default=",".join(str(port) for port in DEFAULT_NMAP_PORTS),
+        help="Ports TCP séparés par des virgules (100 maximum)",
+    )
+    parser.add_argument(
+        "--nmap-path",
+        help="Chemin explicite vers l'exécutable Nmap si absent du PATH",
+    )
+    parser.add_argument(
+        "--nmap-max-ips",
+        type=int,
+        default=256,
+        help="Nombre maximal d'IP analysées par exécution (défaut: 256)",
+    )
+    parser.add_argument(
+        "--nmap-include-private",
+        action="store_true",
+        help="Autorise aussi les IP privées/non globales découvertes",
+    )
     args = parser.parse_args()
 
     # Les clés sont lues dans l'environnement pour éviter leur présence dans le
@@ -1018,6 +1193,8 @@ def main() -> int:
         or args.dnsdumpster_today_count < 0
         or args.whois_monthly_quota < 1
         or args.whois_month_count < 0
+        or args.nmap_max_ips < 1
+        or args.nmap_max_ips > 4096
     ):
         parser.error("paramètres workers/retries/delay invalides")
 
@@ -1354,7 +1531,33 @@ def main() -> int:
         if index + 1 < len(unique_ips):
             time.sleep(args.delay)
 
-    # Étape 5 : écriture des sept tables et du résumé de l'exécution.
+    # Étape optionnelle : aucun scan n'est effectué sans le drapeau --nmap.
+    nmap_rows: list[dict[str, Any]] = []
+    if args.nmap:
+        print(
+            "Nmap activé: TCP connect uniquement, ports bornés, sans scripts, "
+            "sans détection de versions ni d'OS.",
+            flush=True,
+        )
+        try:
+            nmap_rows = run_safe_nmap(
+                unique_ips,
+                args.nmap_ports,
+                args.nmap_path,
+                args.nmap_include_private,
+                args.nmap_max_ips,
+            )
+        except RuntimeError as exc:
+            print(f"AVERTISSEMENT: {exc}", file=sys.stderr)
+            nmap_rows = [
+                {
+                    "IP": "", "HoteEtat": "non exécuté", "Protocole": "tcp",
+                    "Port": "", "Etat": "erreur", "Raison": str(exc),
+                    "ServiceIndicatif": "", "Analyse": "Aucun paquet envoyé",
+                }
+            ]
+
+    # Étape 5 : écriture des huit tables et du résumé de l'exécution.
     write_csv(output / "domaines.csv", domain_rows, [
         "Domaine", "Registrar", "Creation", "Expiration", "DerniereModification",
         "Statuts", "ServeursDNS", "ContactAdministratif", "ContactFacturation",
@@ -1388,6 +1591,10 @@ def main() -> int:
         "IP", "ASN", "ISP", "Organisation", "ReseauRdap", "Pays",
         "HebergeurProbable", "CdnOuProxyProbable", "SourceAttribution",
     ])
+    write_csv(output / "nmap.csv", nmap_rows, [
+        "IP", "HoteEtat", "Protocole", "Port", "Etat", "Raison",
+        "ServiceIndicatif", "Analyse",
+    ])
 
     summary = {
         "execution_utc": datetime.now(timezone.utc).isoformat(),
@@ -1395,6 +1602,11 @@ def main() -> int:
         "domaines_demandes": len(domains),
         "noms_decouverts": len(owner_by_name),
         "adresses_ip_uniques": len(unique_ips),
+        "nmap_active": bool(args.nmap),
+        "nmap_ports": args.nmap_ports if args.nmap else [],
+        "nmap_max_ips": args.nmap_max_ips if args.nmap else 0,
+        "nmap_include_private": bool(args.nmap_include_private) if args.nmap else False,
+        "nmap_resultats": len(nmap_rows),
         "services_externes": ["rdap.org", "crt.sh", "ipwho.is", "dns.google"]
         + (["dnsdumpster.com"] if dnsdumpster_api_key else [])
         + (["who.is"] if whois_api_key else []),

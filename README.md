@@ -9,6 +9,8 @@ Le script `domain_inventory.py` utilise uniquement la bibliothèque standard de 
 - accès HTTPS sortant vers `dns.google` pour les requêtes DNS-over-HTTPS
 - accès DNS sortant
 
+Nmap est facultatif. Il n'est requis que si l'option `--nmap` est utilisée.
+
 Les enrichissements DNSDumpster et who.is sont optionnels et nécessitent chacun
 une clé API personnelle. Le script n'effectue aucun scraping de leurs pages web.
 
@@ -203,6 +205,53 @@ chaque domaine. S'il renvoie la même IP qu'un nom classique, la colonne
 `WildcardDNSProbable` vaut `True` et le service doit être considéré comme non
 confirmé tant qu'un contrôle applicatif autorisé n'a pas été effectué.
 
+### Analyse Nmap optionnelle
+
+Nmap est totalement désactivé par défaut. Activez-le uniquement pour des IP que
+vous possédez ou que vous êtes explicitement autorisé à auditer :
+
+```powershell
+python .\domain_inventory.py `
+  --input .\domaines.txt `
+  --output .\resultats `
+  --nmap
+```
+
+Le profil est volontairement borné :
+
+- scan TCP connect (`-sT`) uniquement ;
+- 18 ports TCP courants : `21,22,25,53,80,110,143,443,465,587,993,995,1433,3306,3389,5432,8080,8443` ;
+- cadence normale `-T3` et délai minimal de 50 ms entre sondes ;
+- une seule retransmission au maximum ;
+- délai maximal de 30 secondes par IP ;
+- aucune détection de version (`-sV`) ;
+- aucune détection d'OS (`-O`) ;
+- aucun script NSE (`--script`) ;
+- aucun scan UDP ;
+- IP publiques uniquement par défaut ;
+- 256 IP maximum par exécution.
+
+Un scan TCP connect établit une connexion TCP normale puis la ferme sans envoyer
+de requête applicative. Il reste susceptible d'être journalisé par la cible :
+« non invasif » signifie ici faible périmètre et absence de techniques avancées,
+pas invisibilité.
+
+Options disponibles :
+
+```powershell
+# Liste personnalisée, toujours limitée à 100 ports explicites
+--nmap --nmap-ports 22,25,80,443
+
+# Chemin Nmap si l'exécutable n'est pas dans le PATH
+--nmap --nmap-path "C:\Program Files (x86)\Nmap\nmap.exe"
+
+# Limiter davantage le nombre de cibles
+--nmap --nmap-max-ips 50
+
+# Inclure le réseau privé uniquement si vous êtes autorisé à l'auditer
+--nmap --nmap-include-private
+```
+
 ## Fichiers produits
 
 - `domaines.csv` : registrar, dates, statuts, serveurs DNS, synthèse du contact administratif et du contact de facturation.
@@ -213,6 +262,9 @@ confirmé tant qu'un contrôle applicatif autorisé n'a pas été effectué.
   DNSDumpster pour MX, TXT/SPF, NS, CNAME, AAAA, DMARC et DKIM. Une même valeur
   vue par les deux sources n'apparaît qu'une fois et la colonne `Source` mentionne
   les deux fournisseurs.
+- `nmap.csv` : état des ports TCP testés lorsque `--nmap` est activé. Le fichier
+  contient uniquement l'état, la raison et un nom de service indicatif issu de la
+  table Nmap ; aucune détection de version n'est effectuée.
 - `sous-domaines-dns.csv` : noms vus dans les journaux de certificats, enregistrements A/AAAA et statut de résolution.
 - `adresses-ip.csv` : ASN, opérateur réseau, organisation, pays, attribution probable et indicateur de CDN/proxy.
 - `resume.json` : volume traité, date d'exécution et limites méthodologiques.
