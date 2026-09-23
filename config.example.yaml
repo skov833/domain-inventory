@@ -1,0 +1,53 @@
+# Copiez ce fichier vers config.yaml, puis adaptez les valeurs.
+# config.yaml est ignoré par Git car il peut contenir des secrets.
+
+http:
+  user_agent: "DomainInventory/1.0 (passive asset inventory)"
+
+validation:
+  domain_regex: '^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$'
+
+cdn:
+  provider_regex: 'cloudflare|akamai|fastly|cloudfront|amazon.*front|imperva|sucuri|bunny|stackpath|edgecast|cdn77'
+
+dns:
+  common_subdomain_prefixes:
+    - ftp
+    - mail
+    - www
+    - webmail
+    - ns1
+    - ns2
+  dkim_selectors:
+    - default
+    - selector1
+    - selector2
+    - google
+    - k1
+    - s1
+    - s2
+
+nmap:
+  ports:
+    - 21
+    - 22
+    - 25
+    - 53
+    - 80
+    - 110
+    - 143
+    - 443
+    - 465
+    - 587
+    - 993
+    - 995
+    - 1433
+    - 3306
+    - 3389
+    - 5432
+    - 8080
+    - 8443
+
+api_keys:
+  dnsdumpster: ""
+  whois: ""

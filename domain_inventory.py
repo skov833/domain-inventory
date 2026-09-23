@@ -9,8 +9,9 @@ Le programme prend un ou plusieurs domaines en entrée et exécute quatre étape
 4. attribution des IP à un ASN et à un opérateur apparent.
 
 Les résultats sont écrits dans huit CSV et un résumé JSON. Le script utilise
-uniquement la bibliothèque standard de Python et n'effectue ni brute force DNS,
-ni scan de ports, ni connexion aux services découverts.
+PyYAML pour sa configuration. Il n'effectue aucun brute force DNS. Un scan Nmap
+TCP borné peut être activé explicitement avec ``--nmap`` ; il reste désactivé
+par défaut.
 
 Attention : les requêtes transmettent les domaines recherchés à ``rdap.org`` et
 ``crt.sh``, et les IP à ``rdap.org`` et ``ipwho.is``. Les contacts absents d'une
@@ -39,6 +40,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+try:
+    import yaml
+except ImportError:  # Le message explicite est produit seulement si un YAML est utilisé.
+    yaml = None
 
 
 USER_AGENT = "DomainInventory/1.0 (passive asset inventory)"
@@ -1085,9 +1091,142 @@ def load_domains(args: argparse.Namespace) -> list[str]:
     return sorted(domains)
 
 
+def load_yaml_config(path: Path, explicitly_requested: bool) -> dict[str, Any]:
+    """Charge un fichier YAML sans jamais journaliser son contenu sensible.
+
+    Le fichier ``config.yaml`` par défaut est facultatif. En revanche, un chemin
+    fourni explicitement avec ``--config`` doit exister afin de détecter les
+    erreurs de saisie plutôt que d'exécuter silencieusement une autre configuration.
+    """
+    if not path.exists():
+        if explicitly_requested:
+            raise ValueError(f"fichier de configuration introuvable: {path}")
+        return {}
+    if yaml is None:
+        raise ValueError(
+            "PyYAML est requis pour lire la configuration: "
+            "python -m pip install -r requirements.txt"
+        )
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8-sig"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ValueError(f"configuration YAML invalide ({path}): {exc}") from exc
+    if document is None:
+        return {}
+    if not isinstance(document, dict):
+        raise ValueError("la racine du fichier YAML doit être un objet")
+    return document
+
+
+def config_section(config: dict[str, Any], name: str) -> dict[str, Any]:
+    """Retourne une section YAML et refuse les types ambigus."""
+    value = config.get(name, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"la section YAML '{name}' doit être un objet")
+    return value
+
+
+def string_list(value: Any, field: str, pattern: str) -> tuple[str, ...]:
+    """Valide une liste YAML de chaînes courtes et dédupliquées."""
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"'{field}' doit être une liste YAML non vide")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not re.fullmatch(pattern, item.strip().lower()):
+            raise ValueError(f"valeur invalide dans '{field}': {item!r}")
+        normalized = item.strip().lower()
+        if normalized not in result:
+            result.append(normalized)
+    return tuple(result)
+
+
+def apply_yaml_config(config: dict[str, Any]) -> dict[str, str]:
+    """Applique les constantes configurables et retourne les clés API du YAML."""
+    global USER_AGENT, DOMAIN_RE, CDN_RE
+    global COMMON_SUBDOMAIN_PREFIXES, DEFAULT_DKIM_SELECTORS, DEFAULT_NMAP_PORTS
+
+    http = config_section(config, "http")
+    validation = config_section(config, "validation")
+    cdn = config_section(config, "cdn")
+    dns = config_section(config, "dns")
+    nmap = config_section(config, "nmap")
+    api_keys = config_section(config, "api_keys")
+
+    if "user_agent" in http:
+        user_agent = http["user_agent"]
+        if not isinstance(user_agent, str) or not user_agent.strip() or len(user_agent) > 256:
+            raise ValueError("'http.user_agent' doit être une chaîne de 1 à 256 caractères")
+        USER_AGENT = user_agent.strip()
+
+    if "domain_regex" in validation:
+        pattern = validation["domain_regex"]
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("'validation.domain_regex' doit être une chaîne non vide")
+        try:
+            DOMAIN_RE = re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(f"'validation.domain_regex' est invalide: {exc}") from exc
+
+    if "provider_regex" in cdn:
+        pattern = cdn["provider_regex"]
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("'cdn.provider_regex' doit être une chaîne non vide")
+        try:
+            CDN_RE = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"'cdn.provider_regex' est invalide: {exc}") from exc
+
+    if "common_subdomain_prefixes" in dns:
+        COMMON_SUBDOMAIN_PREFIXES = string_list(
+            dns["common_subdomain_prefixes"],
+            "dns.common_subdomain_prefixes",
+            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+        )
+    if "dkim_selectors" in dns:
+        DEFAULT_DKIM_SELECTORS = string_list(
+            dns["dkim_selectors"], "dns.dkim_selectors", r"[a-z0-9_-]{1,63}"
+        )
+    if "ports" in nmap:
+        ports = nmap["ports"]
+        if not isinstance(ports, list):
+            raise ValueError("'nmap.ports' doit être une liste YAML")
+        DEFAULT_NMAP_PORTS = tuple(parse_port_list(",".join(str(port) for port in ports)))
+
+    result: dict[str, str] = {}
+    for field in ("dnsdumpster", "whois"):
+        value = api_keys.get(field, "")
+        if value is None:
+            value = ""
+        if not isinstance(value, str):
+            raise ValueError(f"'api_keys.{field}' doit être une chaîne")
+        result[field] = value.strip()
+    return result
+
+
 def main() -> int:
     """Analyse les options, orchestre la collecte et écrit les livrables."""
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", default="config.yaml")
+    preliminary, _ = config_parser.parse_known_args()
+    explicitly_requested = any(
+        argument == "--config" or argument.startswith("--config=")
+        for argument in sys.argv[1:]
+    )
+    config_path = Path(preliminary.config).expanduser().resolve()
+    try:
+        yaml_config = load_yaml_config(config_path, explicitly_requested)
+        yaml_api_keys = apply_yaml_config(yaml_config)
+    except ValueError as exc:
+        config_parser.error(str(exc))
+
     parser = argparse.ArgumentParser(description="Inventaire passif de domaines")
+    parser.add_argument(
+        "--config",
+        default=str(config_path),
+        help="Fichier YAML de configuration (défaut: ./config.yaml s'il existe)",
+    )
     parser.add_argument("--input", "-i", help="Fichier texte, un domaine par ligne")
     parser.add_argument("--domain", "-d", action="append", help="Domaine (option répétable)")
     parser.add_argument("--output", "-o", default=f"domain-inventory-{datetime.now():%Y%m%d-%H%M%S}")
@@ -1177,10 +1316,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Les clés sont lues dans l'environnement pour éviter leur présence dans le
-    # code source, les CSV, le fichier de domaines et l'historique de commande.
-    dnsdumpster_api_key = os.environ.get("DNSDUMPSTER_API_KEY", "").strip()
-    whois_api_key = os.environ.get("WHOIS_API_KEY", "").strip()
+    # Une variable d'environnement remplace la valeur YAML. Les clés ne sont
+    # jamais inscrites dans les CSV, le résumé ou les journaux du programme.
+    dnsdumpster_api_key = os.environ.get(
+        "DNSDUMPSTER_API_KEY", yaml_api_keys["dnsdumpster"]
+    ).strip()
+    whois_api_key = os.environ.get("WHOIS_API_KEY", yaml_api_keys["whois"]).strip()
 
     if not args.input and not args.domain:
         parser.error("utilisez --input ou au moins un --domain")
@@ -1598,7 +1739,8 @@ def main() -> int:
 
     summary = {
         "execution_utc": datetime.now(timezone.utc).isoformat(),
-        "mode": "collecte passive uniquement",
+        "mode": "collecte passive et scan Nmap limité" if args.nmap else "collecte passive uniquement",
+        "configuration_file": str(config_path) if config_path.exists() else None,
         "domaines_demandes": len(domains),
         "noms_decouverts": len(owner_by_name),
         "adresses_ip_uniques": len(unique_ips),

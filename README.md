@@ -1,15 +1,24 @@
 # Inventaire passif de domaines — Python
 
-Le script `domain_inventory.py` utilise uniquement la bibliothèque standard de Python. Il collecte des informations publiques sans scan de ports, brute force DNS ni connexion aux services découverts.
+Le script `domain_inventory.py` collecte des informations publiques et peut,
+sur demande explicite, lancer un scan Nmap TCP limité. Sa configuration peut
+être externalisée dans un fichier YAML.
 
 ## Prérequis
 
 - Python 3.10 ou plus récent
+- PyYAML 6.x
 - accès HTTPS sortant vers `rdap.org`, `crt.sh` et `ipwho.is`
 - accès HTTPS sortant vers `dns.google` pour les requêtes DNS-over-HTTPS
 - accès DNS sortant
 
 Nmap est facultatif. Il n'est requis que si l'option `--nmap` est utilisée.
+
+Installez la dépendance Python :
+
+```powershell
+python -m pip install -r .\requirements.txt
+```
 
 Les enrichissements DNSDumpster et who.is sont optionnels et nécessitent chacun
 une clé API personnelle. Le script n'effectue aucun scraping de leurs pages web.
@@ -22,11 +31,54 @@ Placez un domaine par ligne dans `domaines.txt`, puis lancez :
 python .\domain_inventory.py --input .\domaines.txt --output .\resultats
 ```
 
+### Configuration YAML
+
+Copiez le modèle fourni, puis modifiez la copie locale :
+
+```powershell
+Copy-Item .\config.example.yaml .\config.yaml
+python .\domain_inventory.py --config .\config.yaml --input .\domaines.txt
+```
+
+Le chemin par défaut est `config.yaml` dans le dossier courant. Ce fichier est
+facultatif : si aucune copie n'existe, les valeurs intégrées au script restent
+actives. Un autre chemin peut être indiqué avec `--config`.
+
+Le YAML permet de configurer :
+
+- le `User-Agent` HTTP ;
+- l'expression régulière de validation des domaines ;
+- l'expression de reconnaissance des CDN et reverse proxies ;
+- les préfixes de sous-domaines classiques ;
+- les sélecteurs DKIM testés par défaut ;
+- les ports Nmap par défaut ;
+- les clés API DNSDumpster et who.is.
+
+Extrait minimal pour les clés :
+
+```yaml
+api_keys:
+  dnsdumpster: "votre_cle_dnsdumpster"
+  whois: "wis_live_votre_cle_whois"
+```
+
+`config.yaml` et `config.local.yaml` sont ignorés par Git. Ne placez jamais de
+vraie clé dans `config.example.yaml`, qui est versionné. Restreignez également
+les droits de lecture du fichier local lorsqu'il contient des secrets.
+
+Ordre de priorité :
+
+1. argument de ligne de commande, lorsqu'une option correspondante existe ;
+2. variable d'environnement pour les clés API ;
+3. valeur du fichier YAML ;
+4. valeur intégrée au script.
+
 ### Activer DNSDumpster et who.is
 
 Créez les clés dans les tableaux de bord des services, puis placez-les dans des
-variables d'environnement. Elles ne seront ni enregistrées dans les CSV ni
-affichées par le script :
+variables d'environnement, ou utilisez la section `api_keys` du YAML. Elles ne
+seront ni enregistrées dans les CSV ni affichées par le script. Les variables
+d'environnement remplacent les valeurs du YAML :
 
 ```powershell
 $env:DNSDUMPSTER_API_KEY = "votre_cle_dnsdumpster"
