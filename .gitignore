@@ -1,0 +1,27 @@
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+.dnsdumpster-usage.json
+.whois-usage.json
+
+# Résultats produits par le script
+domain-inventory-*/
+resultats*/
+test-*/
+*.csv
+resume.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Outils et éditeurs
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
