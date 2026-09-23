@@ -453,6 +453,47 @@ propriétaire et exposerait inutilement les clés au processus privilégié.
 
 Les CSV sont encodés en UTF-8 avec BOM et utilisent le point-virgule, pour une ouverture simple dans Excel en environnement français.
 
+## Générer un rapport HTML complet
+
+Le script annexe `generate_report.py` transforme un dossier de résultats
+existant en un rapport HTML autonome. Il n'effectue aucun appel réseau et ne
+modifie pas les CSV ou le JSON source.
+
+Sous Windows :
+
+```powershell
+python .\generate_report.py `
+  --input-dir .\resultats `
+  --output .\resultats\rapport.html `
+  --language fr
+```
+
+Sous Linux/Debian :
+
+```bash
+python3 ./generate_report.py \
+  --input-dir ./resultats \
+  --output ./resultats/rapport.html \
+  --language fr
+```
+
+Si `--output` est omis, le fichier est créé sous
+`<input-dir>/report.html`. Les langues disponibles sont `fr` et `en`.
+
+Le rapport contient :
+
+- une synthèse chiffrée de l'exécution ;
+- l'état de présence de chaque fichier attendu ;
+- tous les champs de `resume.json` ;
+- l'intégralité des lignes de chacun des huit CSV ;
+- le nombre de ports Nmap ouverts observés ;
+- les limites méthodologiques et les avertissements d'attribution.
+
+Le HTML contient son propre style, fonctionne hors ligne et propose une mise en
+page d'impression. Les valeurs des CSV et du JSON sont échappées avant leur
+insertion dans le document. Un fichier absent est signalé dans le rapport sans
+empêcher la génération des autres sections.
+
 ## Confidentialité et limites
 
 La liste des domaines et les noms découverts sont transmis aux services activés.

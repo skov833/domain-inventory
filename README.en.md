@@ -288,6 +288,46 @@ English script intentionally preserves the established French filenames and
 column identifiers so both language versions can feed the same downstream
 processing.
 
+## Generate a complete HTML report
+
+The companion `generate_report.py` script converts an existing output directory
+into a self-contained HTML report. It makes no network request and never alters
+the source CSV or JSON files.
+
+Windows:
+
+```powershell
+python .\generate_report.py `
+  --input-dir .\results `
+  --output .\results\report.html `
+  --language en
+```
+
+Debian/Linux:
+
+```bash
+python3 ./generate_report.py \
+  --input-dir ./results \
+  --output ./results/report.html \
+  --language en
+```
+
+When `--output` is omitted, the report is written to
+`<input-dir>/report.html`. Available languages are `fr` and `en`.
+
+The report includes:
+
+- execution overview cards;
+- availability status for every expected file;
+- every field from `resume.json`;
+- every row from all eight CSV files;
+- the number of observed open Nmap ports;
+- methodological and hosting-attribution warnings.
+
+The HTML embeds its own style, works offline, and includes print styling. CSV
+and JSON values are HTML-escaped before insertion. Missing files are reported
+without preventing the remaining sections from being generated.
+
 ## Privacy and limitations
 
 Domains and discovered names are transmitted to enabled public services.
