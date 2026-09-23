@@ -6,6 +6,7 @@ Le script `domain_inventory.py` utilise uniquement la bibliothèque standard de 
 
 - Python 3.10 ou plus récent
 - accès HTTPS sortant vers `rdap.org`, `crt.sh` et `ipwho.is`
+- accès HTTPS sortant vers `dns.google` pour les requêtes DNS-over-HTTPS
 - accès DNS sortant
 
 Les enrichissements DNSDumpster et who.is sont optionnels et nécessitent chacun
@@ -126,12 +127,47 @@ python .\domain_inventory.py -d exemple.fr -d exemple.com -o .\resultats
 
 Options utiles : `--workers 12`, `--delay 0.35` et `--retries 3`. Pour 400 domaines, conservez une temporisation afin de respecter les services publics.
 
+### Contrôles DNS et messagerie
+
+Pour chaque domaine, le script interroge Google Public DNS en DNS-over-HTTPS et
+enregistre les résultats dans `enregistrements-dns.csv` :
+
+- `MX` ;
+- `TXT`, avec identification des politiques SPF commençant par `v=spf1` ;
+- `CNAME` (le type DNS s'écrit CNAME, parfois abrégé par erreur en « CNAM ») ;
+- `AAAA` ;
+- DMARC sur `_dmarc.<domaine>` ;
+- DKIM sur plusieurs sélecteurs courants.
+
+Comme un sélecteur DKIM ne peut pas être découvert automatiquement par DNS, les
+sélecteurs testés par défaut sont `default`, `selector1`, `selector2`, `google`,
+`k1`, `s1` et `s2`. Ils peuvent être remplacés en répétant l'option :
+
+```powershell
+python .\domain_inventory.py `
+  --input .\domaines.txt `
+  --dkim-selector selector1 `
+  --dkim-selector selector2 `
+  --dkim-selector mon-selecteur `
+  --output .\resultats
+```
+
+Le script ajoute aussi systématiquement les noms suivants à la résolution DNS :
+`ftp`, `mail`, `www`, `webmail`, `ns1` et `ns2`. Leur origine est marquée
+`test de sous-domaine classique` dans `sous-domaines-dns.csv`.
+
+Pour éviter les faux positifs, un nom aléatoire inexistant est aussi résolu pour
+chaque domaine. S'il renvoie la même IP qu'un nom classique, la colonne
+`WildcardDNSProbable` vaut `True` et le service doit être considéré comme non
+confirmé tant qu'un contrôle applicatif autorisé n'a pas été effectué.
+
 ## Fichiers produits
 
 - `domaines.csv` : registrar, dates, statuts, serveurs DNS, synthèse du contact administratif et du contact de facturation.
 - `contacts-rdap.csv` : détail des entités RDAP publiques, y compris les rôles `administrative`, `billing`, `technical`, `registrant`, `abuse`, `registrar` ou `reseller` lorsqu'ils sont publiés. Les entités imbriquées sont également parcourues.
 - `contacts-whois.csv` : contacts WHOIS normalisés renvoyés par l'API who.is, lorsque cette source est activée.
 - `dnsdumpster.csv` : hôtes, IP, PTR, ASN, propriétaire réseau et pays renvoyés par DNSDumpster. Les hôtes trouvés sont fusionnés avec ceux de `crt.sh` avant résolution DNS.
+- `enregistrements-dns.csv` : résultats MX, TXT/SPF, CNAME, AAAA, DMARC et DKIM, y compris les contrôles sans réponse.
 - `sous-domaines-dns.csv` : noms vus dans les journaux de certificats, enregistrements A/AAAA et statut de résolution.
 - `adresses-ip.csv` : ASN, opérateur réseau, organisation, pays, attribution probable et indicateur de CDN/proxy.
 - `resume.json` : volume traité, date d'exécution et limites méthodologiques.
@@ -141,7 +177,8 @@ Les CSV sont encodés en UTF-8 avec BOM et utilisent le point-virgule, pour une 
 ## Confidentialité et limites
 
 La liste des domaines et les noms découverts sont transmis aux services activés.
-Sans clés optionnelles, il s'agit de `rdap.org`, `crt.sh` et `ipwho.is`. Avec les
+Sans clés optionnelles, il s'agit de `rdap.org`, `crt.sh`, `dns.google` et
+`ipwho.is`. Avec les
 enrichissements, les domaines sont aussi transmis à DNSDumpster et/ou who.is.
 Pour une confidentialité totale, il faut remplacer ces sources par des services
 internes ou des miroirs maîtrisés.

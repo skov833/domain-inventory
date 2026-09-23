@@ -8,7 +8,7 @@ Le programme prend un ou plusieurs domaines en entrée et exécute quatre étape
 3. résolution DNS A/AAAA des noms trouvés ;
 4. attribution des IP à un ASN et à un opérateur apparent.
 
-Les résultats sont écrits dans six CSV et un résumé JSON. Le script utilise
+Les résultats sont écrits dans sept CSV et un résumé JSON. Le script utilise
 uniquement la bibliothèque standard de Python et n'effectue ni brute force DNS,
 ni scan de ports, ni connexion aux services découverts.
 
@@ -25,6 +25,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import sys
 import time
@@ -47,6 +48,8 @@ CDN_RE = re.compile(
     r"bunny|stackpath|edgecast|cdn77",
     re.IGNORECASE,
 )
+COMMON_SUBDOMAIN_PREFIXES = ("ftp", "mail", "www", "webmail", "ns1", "ns2")
+DEFAULT_DKIM_SELECTORS = ("default", "selector1", "selector2", "google", "k1", "s1", "s2")
 
 
 def normalize_domain(value: str) -> str | None:
@@ -275,6 +278,121 @@ def certificate_names(domain: str, retries: int, delay: float) -> list[str]:
             if name and (name == domain or name.endswith(f".{domain}")):
                 names.add(name)
     return sorted(names)
+
+
+def dns_over_https(
+    name: str, record_type: str, retries: int, delay: float
+) -> tuple[int | None, list[dict[str, Any]]]:
+    """Interroge Google Public DNS via son API JSON DNS-over-HTTPS.
+
+    Args:
+        name: Nom DNS à interroger, déjà normalisé.
+        record_type: Type canonique tel que ``MX``, ``TXT``, ``CNAME`` ou ``AAAA``.
+        retries: Nombre de tentatives HTTP.
+        delay: Temporisation de base entre les tentatives.
+
+    Returns:
+        Un couple ``(code DNS, réponses)``. Le code ``0`` signifie NOERROR,
+        ``3`` NXDOMAIN et ``None`` une indisponibilité HTTP/JSON.
+    """
+    query = urllib.parse.urlencode(
+        {
+            "name": name,
+            "type": record_type,
+            # Empêche l'envoi d'une partie de l'IP cliente aux serveurs faisant
+            # autorité par le mécanisme EDNS Client Subnet.
+            "edns_client_subnet": "0.0.0.0/0",
+        }
+    )
+    data = http_json(
+        f"https://dns.google/resolve?{query}", retries, delay, "Google Public DNS"
+    )
+    if not isinstance(data, dict):
+        return None, []
+    answers = [item for item in (data.get("Answer") or []) if isinstance(item, dict)]
+    return data.get("Status"), answers
+
+
+def collect_domain_dns_records(
+    domain: str,
+    dkim_selectors: Iterable[str],
+    retries: int,
+    delay: float,
+    workers: int,
+) -> list[dict[str, Any]]:
+    """Collecte les enregistrements DNS et contrôles de messagerie d'un domaine.
+
+    Les sélecteurs DKIM ne peuvent pas être découverts de façon générique par
+    DNS. Le script teste donc une liste configurable de sélecteurs fréquents.
+    Chaque interrogation, y compris une absence de réponse, produit au moins une
+    ligne afin que le contrôle soit auditable.
+    """
+    checks: list[tuple[str, str, str]] = [
+        (domain, "MX", "MX"),
+        (domain, "TXT", "TXT/SPF"),
+        (domain, "CNAME", "CNAME"),
+        (domain, "AAAA", "AAAA"),
+        (f"_dmarc.{domain}", "TXT", "DMARC"),
+    ]
+    checks.extend(
+        (f"{selector}._domainkey.{domain}", "TXT", "DKIM")
+        for selector in dkim_selectors
+    )
+
+    results: list[dict[str, Any]] = []
+
+    def run_check(check: tuple[str, str, str]) -> list[dict[str, Any]]:
+        query_name, record_type, category = check
+        status, answers = dns_over_https(query_name, record_type, retries, delay)
+        rows: list[dict[str, Any]] = []
+        matching_answers = [
+            answer for answer in answers if int(answer.get("type", -1)) in {
+                "MX": 15, "TXT": 16, "CNAME": 5, "AAAA": 28
+            }.values()
+        ]
+        for answer in matching_answers:
+            value = str(answer.get("data") or "")
+            logical_category = category
+            if category == "TXT/SPF":
+                logical_category = "SPF" if value.strip('"').lower().startswith("v=spf1") else "TXT"
+            elif category == "DMARC" and not value.strip('"').lower().startswith("v=dmarc1"):
+                logical_category = "TXT (_dmarc, non DMARC)"
+            elif category == "DKIM" and "v=dkim1" not in value.lower():
+                logical_category = "TXT (_domainkey, non DKIM)"
+            rows.append(
+                {
+                    "Domaine": domain,
+                    "NomInterroge": query_name,
+                    "TypeDNS": record_type,
+                    "Categorie": logical_category,
+                    "Valeur": value,
+                    "TTL": answer.get("TTL") or "",
+                    "CodeDNS": status if status is not None else "",
+                    "Statut": "Présent",
+                    "Source": "Google Public DNS over HTTPS",
+                }
+            )
+        if not rows:
+            rows.append(
+                {
+                    "Domaine": domain,
+                    "NomInterroge": query_name,
+                    "TypeDNS": record_type,
+                    "Categorie": category,
+                    "Valeur": "",
+                    "TTL": "",
+                    "CodeDNS": status if status is not None else "",
+                    "Statut": "Absent" if status is not None else "Indisponible",
+                    "Source": "Google Public DNS over HTTPS",
+                }
+            )
+        return rows
+
+    with ThreadPoolExecutor(max_workers=min(max(1, workers), len(checks), 8)) as pool:
+        futures = [pool.submit(run_check, check) for check in checks]
+        for future in as_completed(futures):
+            results.extend(future.result())
+    return sorted(results, key=lambda row: (row["NomInterroge"], row["TypeDNS"], row["Valeur"]))
 
 
 def whois_contact_summary(contact: Any) -> str:
@@ -589,6 +707,15 @@ def main() -> int:
     parser.add_argument("--delay", type=float, default=0.35, help="Pause entre appels d'attribution IP")
     parser.add_argument("--retries", type=int, default=3, help="Tentatives HTTP (défaut: 3)")
     parser.add_argument(
+        "--dkim-selector",
+        action="append",
+        dest="dkim_selectors",
+        help=(
+            "Sélecteur DKIM à tester (option répétable). Sans cette option, "
+            "plusieurs sélecteurs courants sont testés."
+        ),
+    )
+    parser.add_argument(
         "--dnsdumpster-daily-quota",
         type=int,
         default=50,
@@ -654,7 +781,8 @@ def main() -> int:
     rdap_contact_rows: list[dict[str, Any]] = []
     whois_contact_rows: list[dict[str, Any]] = []
     dnsdumpster_rows: list[dict[str, Any]] = []
-    discovered_by_root: dict[str, list[str]] = {}
+    domain_dns_rows: list[dict[str, Any]] = []
+    discovered_by_root: dict[str, dict[str, set[str]]] = {}
     dnsdumpster_state_file = Path(args.dnsdumpster_state_file).expanduser().resolve()
     dnsdumpster_usage = load_dnsdumpster_usage(
         dnsdumpster_state_file, args.dnsdumpster_today_count
@@ -663,6 +791,15 @@ def main() -> int:
     whois_state_file = Path(args.whois_state_file).expanduser().resolve()
     whois_usage = load_whois_usage(whois_state_file, args.whois_month_count)
     whois_skipped_quota = 0
+    dkim_selectors = tuple(
+        dict.fromkeys(
+            selector.strip().lower()
+            for selector in (args.dkim_selectors or DEFAULT_DKIM_SELECTORS)
+            if re.fullmatch(r"[a-z0-9_-]{1,63}", selector.strip().lower())
+        )
+    )
+    if not dkim_selectors:
+        parser.error("aucun sélecteur DKIM valide")
 
     print(
         "Sources optionnelles: "
@@ -750,7 +887,11 @@ def main() -> int:
         )
         for entity in walk_rdap_entities((rdap or {}).get("entities") or []):
             rdap_contact_rows.append(rdap_entity_row(root, entity))
-        discovered_names = set(certificate_names(root, args.retries, args.delay))
+        source_map: dict[str, set[str]] = {}
+        for name in certificate_names(root, args.retries, args.delay):
+            source_map.setdefault(name, set()).add(
+                "domaine racine" if name == root else "crt.sh"
+            )
         if dnsdumpster_api_key and dnsdumpster_usage < args.dnsdumpster_daily_quota:
             # Le compteur est incrémenté avant l'appel : même si le processus est
             # interrompu ou si l'API échoue, le suivi local reste conservateur.
@@ -765,7 +906,8 @@ def main() -> int:
                 # tentative pourrait consommer une unité de quota supplémentaire.
                 root, dnsdumpster_api_key, 1, args.delay
             )
-            discovered_names.update(dumpster_names)
+            for name in dumpster_names:
+                source_map.setdefault(name, set()).add("DNSDumpster")
             dnsdumpster_rows.extend(dumpster_records)
             # Limite officielle : au plus une requête toutes les deux secondes.
             time.sleep(max(2.0, args.delay))
@@ -777,14 +919,27 @@ def main() -> int:
                     "cette source est ignorée pour les domaines restants.",
                     file=sys.stderr,
                 )
-        discovered_by_root[root] = sorted(discovered_names)
+        # Ajout explicite des noms classiques demandés, même s'ils ne sont pas
+        # présents dans les journaux de certificats ou chez DNSDumpster.
+        for prefix in COMMON_SUBDOMAIN_PREFIXES:
+            source_map.setdefault(f"{prefix}.{root}", set()).add(
+                "test de sous-domaine classique"
+            )
+        discovered_by_root[root] = source_map
+
+        print(f"[{root}] Contrôles DNS et messagerie...", flush=True)
+        domain_dns_rows.extend(
+            collect_domain_dns_records(
+                root, dkim_selectors, args.retries, args.delay, args.workers
+            )
+        )
         time.sleep(args.delay)
 
     # Un nom peut appartenir à plusieurs domaines demandés (cas de listes
     # redondantes). Cette table permet une seule résolution DNS par nom unique.
     owner_by_name: dict[str, set[str]] = {}
-    for root, names in discovered_by_root.items():
-        for name in names:
+    for root, source_map in discovered_by_root.items():
+        for name in source_map:
             owner_by_name.setdefault(name, set()).add(root)
 
     # Étape 2 : les résolutions DNS, indépendantes, sont parallélisées.
@@ -795,6 +950,17 @@ def main() -> int:
         for future in as_completed(futures):
             result = future.result()
             resolved[result["name"]] = result
+
+    # Un nom aléatoire permet de détecter un éventuel DNS générique (wildcard).
+    # Si ce nom inexistant se résout, les sous-domaines classiques qui renvoient
+    # les mêmes IP doivent être interprétés avec prudence.
+    wildcard_ips_by_root: dict[str, set[str]] = {}
+    for root in domains:
+        probe_name = f"codex-wildcard-check-{secrets.token_hex(6)}.{root}"
+        probe = resolve_name(probe_name)
+        wildcard_ips_by_root[root] = {
+            ip for _, ip in probe["addresses"]
+        }
 
     # Étape 3 : transformation des réponses DNS en lignes CSV et constitution
     # d'un ensemble d'IP, ce qui évite d'enrichir plusieurs fois la même adresse.
@@ -812,14 +978,22 @@ def main() -> int:
                         "IP": "",
                         "StatutDNS": "Non résolu",
                         "ErreurDNS": result["error"],
-                        "SourceSousDomaine": (
-                            "crt.sh / DNSDumpster / domaine racine (sources fusionnées)"
-                            if dnsdumpster_api_key else "crt.sh / domaine racine"
+                        "WildcardDNSProbable": False,
+                        "Commentaire": "",
+                        "SourceSousDomaine": ", ".join(
+                            sorted(discovered_by_root[root][name])
                         ),
                     }
                 )
             for record_type, ip in result["addresses"]:
                 unique_ips.add(ip)
+                is_classic_test = (
+                    "test de sous-domaine classique"
+                    in discovered_by_root[root][name]
+                )
+                wildcard_probable = (
+                    is_classic_test and ip in wildcard_ips_by_root.get(root, set())
+                )
                 dns_rows.append(
                     {
                         "DomaineRacine": root,
@@ -828,9 +1002,13 @@ def main() -> int:
                         "IP": ip,
                         "StatutDNS": "Résolu",
                         "ErreurDNS": "",
-                        "SourceSousDomaine": (
-                            "crt.sh / DNSDumpster / domaine racine (sources fusionnées)"
-                            if dnsdumpster_api_key else "crt.sh / domaine racine"
+                        "WildcardDNSProbable": wildcard_probable,
+                        "Commentaire": (
+                            "Même IP qu'un nom aléatoire inexistant; service réel non confirmé"
+                            if wildcard_probable else ""
+                        ),
+                        "SourceSousDomaine": ", ".join(
+                            sorted(discovered_by_root[root][name])
                         ),
                     }
                 )
@@ -844,7 +1022,7 @@ def main() -> int:
         if index + 1 < len(unique_ips):
             time.sleep(args.delay)
 
-    # Étape 5 : écriture des six tables et du résumé de l'exécution.
+    # Étape 5 : écriture des sept tables et du résumé de l'exécution.
     write_csv(output / "domaines.csv", domain_rows, [
         "Domaine", "Registrar", "Creation", "Expiration", "DerniereModification",
         "Statuts", "ServeursDNS", "ContactAdministratif", "ContactFacturation",
@@ -863,8 +1041,13 @@ def main() -> int:
         "DomaineRacine", "Type", "Hote", "IP", "PTR", "ASN", "ProprietaireASN",
         "PlageASN", "Pays", "CodePays", "Source",
     ])
+    write_csv(output / "enregistrements-dns.csv", domain_dns_rows, [
+        "Domaine", "NomInterroge", "TypeDNS", "Categorie", "Valeur", "TTL",
+        "CodeDNS", "Statut", "Source",
+    ])
     write_csv(output / "sous-domaines-dns.csv", dns_rows, [
-        "DomaineRacine", "Nom", "Type", "IP", "StatutDNS", "ErreurDNS", "SourceSousDomaine",
+        "DomaineRacine", "Nom", "Type", "IP", "StatutDNS", "ErreurDNS",
+        "WildcardDNSProbable", "Commentaire", "SourceSousDomaine",
     ])
     write_csv(output / "adresses-ip.csv", ip_rows, [
         "IP", "ASN", "ISP", "Organisation", "ReseauRdap", "Pays",
@@ -877,7 +1060,7 @@ def main() -> int:
         "domaines_demandes": len(domains),
         "noms_decouverts": len(owner_by_name),
         "adresses_ip_uniques": len(unique_ips),
-        "services_externes": ["rdap.org", "crt.sh", "ipwho.is"]
+        "services_externes": ["rdap.org", "crt.sh", "ipwho.is", "dns.google"]
         + (["dnsdumpster.com"] if dnsdumpster_api_key else [])
         + (["who.is"] if whois_api_key else []),
         "dnsdumpster_active": bool(dnsdumpster_api_key),
@@ -899,6 +1082,9 @@ def main() -> int:
         "contacts_rdap_publics": len(rdap_contact_rows),
         "contacts_whois_publics": len(whois_contact_rows),
         "enregistrements_dnsdumpster": len(dnsdumpster_rows),
+        "controles_dns": len(domain_dns_rows),
+        "sous_domaines_classiques_testes": list(COMMON_SUBDOMAIN_PREFIXES),
+        "selecteurs_dkim_testes": list(dkim_selectors),
         "avertissement": (
             "Les contacts peuvent être masqués; les sous-domaines issus des journaux de "
             "certificats ne sont pas exhaustifs; l'hébergeur est une attribution probable "
