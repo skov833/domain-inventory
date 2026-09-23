@@ -14,11 +14,54 @@ sur demande explicite, lancer un scan Nmap TCP limité. Sa configuration peut
 
 Nmap est facultatif. Il n'est requis que si l'option `--nmap` est utilisée.
 
-Installez la dépendance Python :
+### Installation sous Windows
+
+Dans PowerShell, créez de préférence un environnement virtuel :
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 python -m pip install -r .\requirements.txt
 ```
+
+Installez Nmap pour Windows uniquement si vous utiliserez `--nmap`, puis
+vérifiez que `nmap.exe` est dans le `PATH` ou fournissez `--nmap-path`.
+
+### Installation sous Linux/Debian
+
+Les paquets Debian permettent d'utiliser les dépendances du système sans
+installation globale avec `pip` :
+
+```bash
+sudo apt update
+sudo apt install python3 python3-yaml ca-certificates
+```
+
+Ajoutez Nmap uniquement si vous utiliserez `--nmap` :
+
+```bash
+sudo apt install nmap
+```
+
+Autre possibilité, avec un environnement virtuel isolé :
+
+```bash
+sudo apt install python3 python3-venv ca-certificates
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+N'utilisez pas `sudo pip install`. Les versions récentes de Debian protègent
+l'environnement Python du système ; utilisez le paquet `python3-yaml` ou un
+environnement virtuel.
+
+Références Debian : paquets officiels
+[`python3-yaml`](https://packages.debian.org/stable/python/python3-yaml) et
+[`nmap`](https://packages.debian.org/stable/nmap), ainsi que les
+[notes de publication Debian sur les environnements Python gérés](https://www.debian.org/releases/stable/release-notes/).
 
 Les enrichissements DNSDumpster et who.is sont optionnels et nécessitent chacun
 une clé API personnelle. Le script n'effectue aucun scraping de leurs pages web.
@@ -31,6 +74,17 @@ Placez un domaine par ligne dans `domaines.txt`, puis lancez :
 python .\domain_inventory.py --input .\domaines.txt --output .\resultats
 ```
 
+Sous Linux/Debian :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --output ./resultats
+```
+
+Le fichier possède un shebang Python 3. Si vous souhaitez l'appeler directement
+sous Linux, rendez votre copie exécutable avec `chmod u+x domain_inventory.py`,
+puis utilisez `./domain_inventory.py`. L'appel explicite avec `python3` fonctionne
+sans modifier ses permissions.
+
 ### Configuration YAML
 
 Copiez le modèle fourni, puis modifiez la copie locale :
@@ -38,6 +92,14 @@ Copiez le modèle fourni, puis modifiez la copie locale :
 ```powershell
 Copy-Item .\config.example.yaml .\config.yaml
 python .\domain_inventory.py --config .\config.yaml --input .\domaines.txt
+```
+
+Sous Linux/Debian :
+
+```bash
+cp ./config.example.yaml ./config.yaml
+chmod 600 ./config.yaml
+python3 ./domain_inventory.py --config ./config.yaml --input ./domaines.txt
 ```
 
 Le chemin par défaut est `config.yaml` dans le dossier courant. Ce fichier est
@@ -63,8 +125,10 @@ api_keys:
 ```
 
 `config.yaml` et `config.local.yaml` sont ignorés par Git. Ne placez jamais de
-vraie clé dans `config.example.yaml`, qui est versionné. Restreignez également
-les droits de lecture du fichier local lorsqu'il contient des secrets.
+vraie clé dans `config.example.yaml`, qui est versionné. Sous Linux, appliquez
+`chmod 600 config.yaml` afin que seul son propriétaire puisse lire et modifier
+les clés. Sous Windows, conservez le fichier dans un profil utilisateur dont les
+droits NTFS ne sont pas partagés avec d'autres comptes.
 
 Ordre de priorité :
 
@@ -93,6 +157,16 @@ Remove-Item Env:DNSDUMPSTER_API_KEY
 Remove-Item Env:WHOIS_API_KEY
 ```
 
+Sous Bash/Linux, utilisez des variables exportées, puis supprimez-les de la
+session après l'exécution :
+
+```bash
+export DNSDUMPSTER_API_KEY="votre_cle_dnsdumpster"
+export WHOIS_API_KEY="wis_live_votre_cle_whois"
+python3 ./domain_inventory.py --input ./domaines.txt --output ./resultats
+unset DNSDUMPSTER_API_KEY WHOIS_API_KEY
+```
+
 DNSDumpster impose officiellement une requête au maximum toutes les deux
 secondes. Le script applique automatiquement cette temporisation. Les quotas
 quotidiens et le nombre maximal de résultats dépendent du compte. who.is applique
@@ -109,9 +183,12 @@ La configuration par défaut correspond au compte communiqué :
 - cadence maximale : une requête toutes les deux secondes.
 
 Le script conserve le compteur dans un dossier d'état stable, indépendant du
-script et des résultats. Sous Windows, le chemin par défaut est
-`%LOCALAPPDATA%\DomainInventory\dnsdumpster-usage.json`. Ce fichier ne contient
-ni clé API ni domaine. Le compteur est réinitialisé automatiquement au changement
+script et des résultats :
+
+- Windows : `%LOCALAPPDATA%\DomainInventory\dnsdumpster-usage.json` ;
+- Linux/Debian : `~/.domain-inventory/dnsdumpster-usage.json`.
+
+Ce fichier ne contient ni clé API ni domaine. Le compteur est réinitialisé automatiquement au changement
 de date. Lorsqu'il atteint 50, la collecte continue
 avec les autres sources, mais DNSDumpster est ignoré pour les domaines restants.
 Les reprises HTTP automatiques sont désactivées pour DNSDumpster afin qu'une
@@ -125,6 +202,12 @@ python .\domain_inventory.py `
   --input .\domaines.txt `
   --output .\resultats `
   --dnsdumpster-today-count 17
+```
+
+Sous Linux/Debian :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --output ./resultats --dnsdumpster-today-count 17
 ```
 
 Le script retient toujours la valeur la plus élevée entre ce paramètre et son
@@ -142,9 +225,12 @@ Le plan gratuit who.is est géré selon ses limites officielles actuelles :
 - cadence maximale : une requête par seconde ;
 - aucun rafraîchissement `live=true`, réservé aux crédits payants.
 
-Le compteur est conservé dans
-`%LOCALAPPDATA%\DomainInventory\whois-usage.json` sous Windows et se réinitialise
-automatiquement au changement de mois UTC. Ce fichier ne contient
+Le compteur est conservé dans :
+
+- Windows : `%LOCALAPPDATA%\DomainInventory\whois-usage.json` ;
+- Linux/Debian : `~/.domain-inventory/whois-usage.json`.
+
+Il se réinitialise automatiquement au changement de mois UTC. Ce fichier ne contient
 ni clé API ni domaine. Une fois les 500 crédits comptabilisés, who.is est ignoré
 pour les domaines restants et toutes les autres sources continuent normalement.
 
@@ -161,6 +247,12 @@ python .\domain_inventory.py `
   --input .\domaines.txt `
   --output .\resultats `
   --whois-month-count 125
+```
+
+Sous Linux/Debian :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --output ./resultats --whois-month-count 125
 ```
 
 Le script retient la valeur la plus élevée entre le compteur déclaré et son état
@@ -202,6 +294,9 @@ python .\domain_inventory.py --input .\domaines.txt --whois-source rdap
 python .\domain_inventory.py --input .\domaines.txt --whois-source both
 ```
 
+Sous Linux/Debian, remplacez `python .\domain_inventory.py` par
+`python3 ./domain_inventory.py` ; les options sont identiques.
+
 En mode `both`, le script vérifie le solde avant chaque endpoint : il peut donc
 exécuter le WHOIS et ignorer le RDAP du même domaine si le dernier crédit
 disponible a été consommé entre les deux. Le fichier `contacts-whois.csv`
@@ -215,10 +310,18 @@ Pour un seul domaine :
 python .\domain_inventory.py --domain acteaumeilleurprix.com --output .\resultats-test
 ```
 
+```bash
+python3 ./domain_inventory.py --domain acteaumeilleurprix.com --output ./resultats-test
+```
+
 Pour plusieurs domaines sans fichier, répétez l'option :
 
 ```powershell
 python .\domain_inventory.py -d exemple.fr -d exemple.com -o .\resultats
+```
+
+```bash
+python3 ./domain_inventory.py -d exemple.fr -d exemple.com -o ./resultats
 ```
 
 Options utiles : `--workers 12`, `--delay 0.35` et `--retries 3`. Pour 400 domaines, conservez une temporisation afin de respecter les services publics.
@@ -248,6 +351,12 @@ python .\domain_inventory.py `
   --output .\resultats
 ```
 
+Sous Linux/Debian :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --dkim-selector selector1 --dkim-selector selector2 --dkim-selector mon-selecteur --output ./resultats
+```
+
 Le script ajoute aussi systématiquement les noms suivants à la résolution DNS :
 `ftp`, `mail`, `www`, `webmail`, `ns1` et `ns2`. Leur origine est marquée
 `test de sous-domaine classique` dans `sous-domaines-dns.csv`.
@@ -267,6 +376,12 @@ python .\domain_inventory.py `
   --input .\domaines.txt `
   --output .\resultats `
   --nmap
+```
+
+Sous Linux/Debian :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --output ./resultats --nmap
 ```
 
 Le profil est volontairement borné :
@@ -303,6 +418,18 @@ Options disponibles :
 # Inclure le réseau privé uniquement si vous êtes autorisé à l'auditer
 --nmap --nmap-include-private
 ```
+
+Sous Linux/Debian, Nmap installé par APT est normalement trouvé automatiquement
+dans `/usr/bin/nmap`. Si nécessaire :
+
+```bash
+python3 ./domain_inventory.py --input ./domaines.txt --nmap --nmap-path /usr/bin/nmap
+```
+
+Le profil `-sT` utilisé par le script repose sur les connexions TCP du système
+et ne nécessite normalement pas les privilèges `root`. N'exécutez pas tout le
+script avec `sudo` : cela créerait les résultats et les compteurs avec un autre
+propriétaire et exposerait inutilement les clés au processus privilégié.
 
 ## Fichiers produits
 
