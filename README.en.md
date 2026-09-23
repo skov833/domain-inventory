@@ -7,6 +7,10 @@ Documentation française : [README.md](README.md). Script français :
 and network-operator information. It can optionally run a bounded TCP connect
 Nmap scan against discovered IP addresses.
 
+Keep `output_merge.py` in the same directory as `domain_inventory.py` and
+`domain_inventory_en.py`. Both main scripts import this module for atomic CSV
+writes and historical merging.
+
 The French and English scripts provide the same collection features and accept
 the same command-line options. The English version keeps the established CSV
 filenames and column names so existing integrations remain compatible, while

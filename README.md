@@ -7,6 +7,10 @@ Le script `domain_inventory.py` collecte des informations publiques et peut,
 sur demande explicite, lancer un scan Nmap TCP limité. Sa configuration peut
 être externalisée dans un fichier YAML.
 
+Conservez `output_merge.py` dans le même dossier que `domain_inventory.py` et
+`domain_inventory_en.py` : les deux scripts principaux importent ce module pour
+l'écriture atomique et la fusion historique des CSV.
+
 ## Prérequis
 
 - Python 3.10 ou plus récent
