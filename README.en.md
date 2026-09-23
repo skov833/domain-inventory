@@ -91,6 +91,46 @@ python3 ./domain_inventory_en.py --domain example.com --domain example.org
 
 Useful options include `--workers 12`, `--delay 0.35`, and `--retries 3`.
 
+## Overwrite or merge results
+
+The default behavior still replaces all eight CSV files:
+
+```bash
+python3 ./domain_inventory_en.py --input ./domains.txt --output ./results --output-mode overwrite
+```
+
+To retain history in the same directory, enable deduplicated merging:
+
+```bash
+python3 ./domain_inventory_en.py --input ./domains.txt --output ./results --output-mode merge
+```
+
+On Windows, use `python .\domain_inventory_en.py` with the same options.
+
+Merge mode:
+
+- loads existing CSV files;
+- deduplicates each dataset with a stable natural key;
+- retains old rows that are not observed during the new run;
+- updates non-empty fields with the new observation;
+- never erases a known value with a new empty value;
+- counts a key at most once per execution, even if the current collection
+  contains duplicate rows;
+- atomically replaces CSV files and `resume.json` after writing temporary files.
+
+Three columns are appended to every CSV in both modes:
+
+- `PremiereObservation`: UTC timestamp of the first observation;
+- `DerniereObservation`: UTC timestamp of the latest run that found the item;
+- `NombreObservations`: number of executions in which the item was observed.
+
+When a legacy CSV has none of these columns, its filesystem modification time
+is used as the initial historical timestamp during the first merge. This is a
+migration approximation, not proof of the actual first-discovery time.
+
+`resume.json` represents the cumulative CSV state after merging and includes an
+`output_mode` field. It is replaced rather than concatenated.
+
 ## YAML configuration
 
 Copy the provided example before editing it.

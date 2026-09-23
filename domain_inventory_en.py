@@ -20,7 +20,6 @@ cannot be reconstructed by this program.
 from __future__ import annotations
 
 import argparse
-import csv
 import ipaddress
 import json
 import os
@@ -39,6 +38,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from output_merge import write_inventory_csv, write_json_atomic
 
 try:
     import yaml
@@ -988,14 +989,6 @@ def ip_attribution(ip: str, retries: int, delay: float) -> dict[str, Any]:
     }
 
 
-def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
-    """Write an Excel-friendly CSV using UTF-8 BOM and semicolon delimiters."""
-    with path.open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter=";")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
 def load_dnsdumpster_usage(state_file: Path, reported_today_count: int) -> int:
     """Load today's DNSDumpster counter.
 
@@ -1225,6 +1218,15 @@ def main() -> int:
     parser.add_argument("--input", "-i", help="Text file containing one domain per line")
     parser.add_argument("--domain", "-d", action="append", help="Domain (repeatable option)")
     parser.add_argument("--output", "-o", default=f"domain-inventory-{datetime.now():%Y%m%d-%H%M%S}")
+    parser.add_argument(
+        "--output-mode",
+        choices=("overwrite", "merge"),
+        default="overwrite",
+        help=(
+            "overwrite replaces CSV files; merge deduplicates and tracks "
+            "PremiereObservation/DerniereObservation/NombreObservations"
+        ),
+    )
     parser.add_argument("--workers", type=int, default=12, help="Parallel DNS resolutions (default: 12)")
     parser.add_argument("--delay", type=float, default=0.35, help="Delay between IP attribution calls")
     parser.add_argument("--retries", type=int, default=3, help="HTTP attempts (default: 3)")
@@ -1692,52 +1694,54 @@ def main() -> int:
                 }
             ]
 
-    # Stage 5: write the eight tables and the execution summary.
-    write_csv(output / "domaines.csv", domain_rows, [
+    # Stage 5: atomic writes with optional historical merge.
+    execution_utc = datetime.now(timezone.utc).isoformat()
+    domain_rows = write_inventory_csv(output / "domaines.csv", domain_rows, [
         "Domaine", "Registrar", "Creation", "Expiration", "DerniereModification",
         "Statuts", "ServeursDNS", "ContactAdministratif", "ContactFacturation",
         "ContactAdministratifWhois", "ContactFacturationWhois",
         "ContactAdministratifWhoisRdap", "ContactFacturationWhoisRdap",
         "ContactsPublics", "RegistrarWhois", "InstantaneWhois",
         "RegistrarWhoisRdap", "InstantaneWhoisRdap", "RessourceWhoisRdap", "Source",
-    ])
-    write_csv(output / "contacts-rdap.csv", rdap_contact_rows, [
+    ], ("Domaine",), args.output_mode, execution_utc)
+    rdap_contact_rows = write_inventory_csv(output / "contacts-rdap.csv", rdap_contact_rows, [
         "Domaine", "Roles", "Handle", "Nom", "Organisation", "Emails",
         "Telephones", "Adresse", "Statuts", "Port43", "LienRdap",
-    ])
-    write_csv(output / "contacts-whois.csv", whois_contact_rows, [
+    ], ("Domaine", "Roles", "Handle", "Nom", "Organisation", "Emails"), args.output_mode, execution_utc)
+    whois_contact_rows = write_inventory_csv(output / "contacts-whois.csv", whois_contact_rows, [
         "Domaine", "SourceType", "Role", "Nom", "Organisation", "Email",
         "Telephone", "Fax", "Rue", "Ville", "Region", "CodePostal", "Pays",
         "Handle", "IdentifiantPublicType", "IdentifiantPublic", "Source",
-    ])
-    write_csv(output / "dnsdumpster.csv", dnsdumpster_rows, [
+    ], ("Domaine", "SourceType", "Role", "Nom", "Organisation", "Email", "Handle"), args.output_mode, execution_utc)
+    dnsdumpster_rows = write_inventory_csv(output / "dnsdumpster.csv", dnsdumpster_rows, [
         "DomaineRacine", "Type", "Hote", "IP", "PTR", "ASN", "ProprietaireASN",
         "PlageASN", "Pays", "CodePays", "Source",
-    ])
-    write_csv(output / "enregistrements-dns.csv", domain_dns_rows, [
+    ], ("DomaineRacine", "Type", "Hote", "IP", "PTR"), args.output_mode, execution_utc)
+    domain_dns_rows = write_inventory_csv(output / "enregistrements-dns.csv", domain_dns_rows, [
         "Domaine", "NomInterroge", "TypeDNS", "Categorie", "Valeur", "TTL",
         "CodeDNS", "Statut", "Source",
-    ])
-    write_csv(output / "sous-domaines-dns.csv", dns_rows, [
+    ], ("Domaine", "NomInterroge", "TypeDNS", "Categorie", "Valeur"), args.output_mode, execution_utc)
+    dns_rows = write_inventory_csv(output / "sous-domaines-dns.csv", dns_rows, [
         "DomaineRacine", "Nom", "Type", "IP", "StatutDNS", "ErreurDNS",
         "WildcardDNSProbable", "Commentaire", "SourceSousDomaine",
-    ])
-    write_csv(output / "adresses-ip.csv", ip_rows, [
+    ], ("DomaineRacine", "Nom", "Type", "IP"), args.output_mode, execution_utc)
+    ip_rows = write_inventory_csv(output / "adresses-ip.csv", ip_rows, [
         "IP", "ASN", "ISP", "Organisation", "ReseauRdap", "Pays",
         "HebergeurProbable", "CdnOuProxyProbable", "SourceAttribution",
-    ])
-    write_csv(output / "nmap.csv", nmap_rows, [
+    ], ("IP",), args.output_mode, execution_utc)
+    nmap_rows = write_inventory_csv(output / "nmap.csv", nmap_rows, [
         "IP", "HoteEtat", "Protocole", "Port", "Etat", "Raison",
         "ServiceIndicatif", "Analyse",
-    ])
+    ], ("IP", "Protocole", "Port"), args.output_mode, execution_utc)
 
     summary = {
-        "execution_utc": datetime.now(timezone.utc).isoformat(),
+        "execution_utc": execution_utc,
+        "output_mode": args.output_mode,
         "mode": "passive collection and bounded Nmap scan" if args.nmap else "passive collection only",
         "configuration_file": str(config_path) if config_path.exists() else None,
-        "domaines_demandes": len(domains),
-        "noms_decouverts": len(owner_by_name),
-        "adresses_ip_uniques": len(unique_ips),
+        "domaines_demandes": len(domain_rows),
+        "noms_decouverts": len({row.get("Nom") for row in dns_rows if row.get("Nom")}),
+        "adresses_ip_uniques": len(ip_rows),
         "nmap_active": bool(args.nmap),
         "nmap_ports": args.nmap_ports if args.nmap else [],
         "nmap_max_ips": args.nmap_max_ips if args.nmap else 0,
@@ -1775,9 +1779,7 @@ def main() -> int:
             "of the IP and may be a CDN or proxy."
         ),
     }
-    (output / "resume.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_json_atomic(output / "resume.json", summary)
     print(f"Completed. Results: {output}", flush=True)
     return 0
 

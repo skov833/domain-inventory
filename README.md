@@ -329,6 +329,51 @@ python3 ./domain_inventory.py -d exemple.fr -d exemple.com -o ./resultats
 
 Options utiles : `--workers 12`, `--delay 0.35` et `--retries 3`. Pour 400 domaines, conservez une temporisation afin de respecter les services publics.
 
+### Remplacement ou fusion des résultats
+
+Le comportement par défaut reste le remplacement complet des huit CSV :
+
+```powershell
+python .\domain_inventory.py --input .\domaines.txt --output .\resultats --output-mode overwrite
+```
+
+Pour conserver l'historique dans le même dossier, activez la fusion :
+
+```powershell
+python .\domain_inventory.py --input .\domaines.txt --output .\resultats --output-mode merge
+```
+
+Sous Linux/Debian, la syntaxe est identique avec
+`python3 ./domain_inventory.py`.
+
+Le mode `merge` :
+
+- charge les CSV existants ;
+- déduplique chaque type de donnée avec une clé métier stable ;
+- conserve les anciennes lignes qui ne sont pas observées pendant la nouvelle
+  exécution ;
+- actualise les champs non vides avec la nouvelle observation ;
+- ne remplace pas une ancienne valeur renseignée par une nouvelle valeur vide ;
+- ne compte qu'une observation par clé et par exécution, même si la collecte
+  courante contient plusieurs doublons ;
+- écrit les CSV et `resume.json` par remplacement atomique.
+
+Trois colonnes sont ajoutées à chacun des huit CSV, dans les deux modes :
+
+- `PremiereObservation` : date UTC de la première observation ;
+- `DerniereObservation` : date UTC de la dernière exécution ayant retrouvé
+  l'élément ;
+- `NombreObservations` : nombre d'exécutions dans lesquelles l'élément a été
+  observé.
+
+Lors de la première fusion d'un ancien CSV qui ne possède pas ces colonnes, la
+date de modification du fichier est utilisée comme date historique initiale.
+Cette date est donc une approximation de migration, pas une preuve de la date
+réelle de première découverte.
+
+`resume.json` représente l'état cumulé des CSV après la fusion et contient aussi
+le champ `output_mode`. Il est remplacé, jamais concaténé.
+
 ### Contrôles DNS et messagerie
 
 Pour chaque domaine, le script interroge Google Public DNS en DNS-over-HTTPS et
