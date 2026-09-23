@@ -52,6 +52,33 @@ COMMON_SUBDOMAIN_PREFIXES = ("ftp", "mail", "www", "webmail", "ns1", "ns2")
 DEFAULT_DKIM_SELECTORS = ("default", "selector1", "selector2", "google", "k1", "s1", "s2")
 
 
+def default_state_directory() -> Path:
+    """Retourne un dossier d'état stable, indépendant du chemin du script."""
+    if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "DomainInventory"
+    return Path.home() / ".domain-inventory"
+
+
+def prepare_state_file(preferred: Path, fallback_name: str) -> Path:
+    """Valide le dossier d'état ou choisit un repli local accessible.
+
+    Le chemin de repli est ``.domain-inventory-state`` dans le dossier courant.
+    Il est utilisé uniquement lorsque le dossier préféré ne peut pas être créé.
+    """
+    try:
+        preferred.parent.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError as exc:
+        fallback = Path.cwd() / ".domain-inventory-state" / fallback_name
+        fallback.parent.mkdir(parents=True, exist_ok=True)
+        print(
+            f"AVERTISSEMENT: dossier d'état principal inaccessible ({exc}); "
+            f"repli vers {fallback}",
+            file=sys.stderr,
+        )
+        return fallback
+
+
 def normalize_domain(value: str) -> str | None:
     """Nettoie et valide un nom de domaine.
 
@@ -77,14 +104,14 @@ def normalize_domain(value: str) -> str | None:
     return candidate if DOMAIN_RE.fullmatch(candidate) else None
 
 
-def http_json(
+def http_json_response(
     url: str,
     retries: int,
     delay: float,
     service: str,
     extra_headers: dict[str, str] | None = None,
-) -> Any | None:
-    """Télécharge et décode un document JSON avec reprises temporisées.
+) -> tuple[Any | None, dict[str, str], int | None]:
+    """Télécharge du JSON et conserve les en-têtes utiles au suivi de quota.
 
     Les erreurs réseau sont non bloquantes : après la dernière tentative, la
     fonction écrit un avertissement et renvoie ``None``. Cela permet à un lot de
@@ -97,6 +124,10 @@ def http_json(
         service: Nom lisible de la source, utilisé dans les avertissements.
         extra_headers: En-têtes supplémentaires, notamment pour l'authentification
             des API optionnelles. Ils ne sont jamais écrits dans les résultats.
+
+    Returns:
+        ``(document JSON, en-têtes en minuscules, statut HTTP)``. Le document
+        vaut ``None`` après un échec définitif.
     """
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
     headers.update(extra_headers or {})
@@ -106,13 +137,50 @@ def http_json(
     for attempt in range(1, retries + 1):
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
-                return json.load(response)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+                response_headers = {key.lower(): value for key, value in response.headers.items()}
+                return json.load(response), response_headers, response.status
+        except urllib.error.HTTPError as exc:
+            response_headers = {key.lower(): value for key, value in exc.headers.items()}
             if attempt == retries:
                 print(f"AVERTISSEMENT: {service} inaccessible: {exc}", file=sys.stderr)
-                return None
+                return None, response_headers, exc.code
             time.sleep(max(0.5, delay * attempt))
-    return None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            if attempt == retries:
+                print(f"AVERTISSEMENT: {service} inaccessible: {exc}", file=sys.stderr)
+                return None, {}, None
+            time.sleep(max(0.5, delay * attempt))
+    return None, {}, None
+
+
+def http_json(
+    url: str,
+    retries: int,
+    delay: float,
+    service: str,
+    extra_headers: dict[str, str] | None = None,
+) -> Any | None:
+    """Version simplifiée de :func:`http_json_response` ne renvoyant que le JSON."""
+    data, _, _ = http_json_response(
+        url, retries, delay, service, extra_headers
+    )
+    return data
+
+
+def rate_limit_from_headers(headers: dict[str, str]) -> dict[str, int]:
+    """Extrait les compteurs normalisés des en-têtes de limitation courants."""
+    result: dict[str, int] = {}
+    mapping = {
+        "x-ratelimit-limit": "limit",
+        "x-ratelimit-remaining": "remaining",
+        "x-credits-charged": "charged",
+    }
+    for header, field in mapping.items():
+        try:
+            result[field] = int(headers[header])
+        except (KeyError, TypeError, ValueError):
+            pass
+    return result
 
 
 def vcard_values(entity: dict[str, Any], prop: str) -> list[str]:
@@ -420,7 +488,7 @@ def whois_contact_summary(contact: Any) -> str:
 
 def get_whois_enrichment(
     domain: str, api_key: str, retries: int, delay: float
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
     """Interroge l'API WHOIS officielle de who.is.
 
     Returns:
@@ -428,13 +496,14 @@ def get_whois_enrichment(
         contacts destinées à ``contacts-whois.csv``.
     """
     url = f"https://api.who.is/v1/whois/{urllib.parse.quote(domain)}"
-    data = http_json(
+    data, headers, _ = http_json_response(
         url,
         retries,
         delay,
         "who.is",
         {"Authorization": f"Bearer {api_key}"},
-    ) or {}
+    )
+    data = data or {}
     rows: list[dict[str, Any]] = []
     contacts = data.get("contacts") or {}
     if isinstance(contacts, dict):
@@ -461,7 +530,7 @@ def get_whois_enrichment(
                         "Source": url,
                     }
                 )
-    return data, rows
+    return data, rows, rate_limit_from_headers(headers)
 
 
 def whois_role_summary(data: dict[str, Any], aliases: Iterable[str]) -> str:
@@ -486,7 +555,9 @@ def whois_role_summary(data: dict[str, Any], aliases: Iterable[str]) -> str:
 
 def get_dnsdumpster_enrichment(
     domain: str, api_key: str, retries: int, delay: float
-) -> tuple[set[str], list[dict[str, Any]]]:
+) -> tuple[
+    set[str], list[dict[str, Any]], list[dict[str, Any]], dict[str, int]
+]:
     """Interroge l'API officielle DNSDumpster et normalise ses enregistrements.
 
     Les catégories de réponse connues (A, MX, NS) contiennent des hôtes et des
@@ -494,26 +565,79 @@ def get_dnsdumpster_enrichment(
     accepte aussi de futures catégories ayant la même structure.
     """
     url = f"https://api.dnsdumpster.com/domain/{urllib.parse.quote(domain)}"
-    data = http_json(
+    data, headers, _ = http_json_response(
         url,
         retries,
         max(delay, 2.0),
         "DNSDumpster",
         {"X-API-Key": api_key},
-    ) or {}
+    )
+    data = data or {}
     names: set[str] = set()
     rows: list[dict[str, Any]] = []
+    dns_rows: list[dict[str, Any]] = []
     if not isinstance(data, dict):
-        return names, rows
+        return names, rows, dns_rows, rate_limit_from_headers(headers)
     for record_type, records in data.items():
         if not isinstance(records, list):
             continue
         for record in records:
+            # TXT/SPF sont généralement des chaînes simples dans la réponse.
+            if isinstance(record, str):
+                value = record.strip()
+                category = (
+                    "SPF" if value.strip('"').lower().startswith("v=spf1")
+                    else str(record_type).upper()
+                )
+                rows.append(
+                    {
+                        "DomaineRacine": domain,
+                        "Type": str(record_type).upper(),
+                        "Hote": domain,
+                        "IP": "",
+                        "PTR": "",
+                        "ASN": "",
+                        "ProprietaireASN": "",
+                        "PlageASN": "",
+                        "Pays": "",
+                        "CodePays": "",
+                        "Source": url,
+                    }
+                )
+                dns_rows.append(
+                    {
+                        "Domaine": domain,
+                        "NomInterroge": domain,
+                        "TypeDNS": "TXT" if category in {"TXT", "SPF"} else category,
+                        "Categorie": category,
+                        "Valeur": value,
+                        "TTL": "",
+                        "CodeDNS": "",
+                        "Statut": "Présent",
+                        "Source": "DNSDumpster",
+                    }
+                )
+                continue
             if not isinstance(record, dict):
                 continue
             host = normalize_domain(str(record.get("host") or ""))
             if host and (host == domain or host.endswith(f".{domain}")):
                 names.add(host)
+            normalized_type = str(record_type).upper()
+            if normalized_type in {"MX", "NS", "CNAME"}:
+                dns_rows.append(
+                    {
+                        "Domaine": domain,
+                        "NomInterroge": domain,
+                        "TypeDNS": normalized_type,
+                        "Categorie": normalized_type,
+                        "Valeur": str(record.get("host") or ""),
+                        "TTL": "",
+                        "CodeDNS": "",
+                        "Statut": "Présent",
+                        "Source": "DNSDumpster",
+                    }
+                )
             ips = record.get("ips") or []
             if not isinstance(ips, list) or not ips:
                 ips = [{}]
@@ -534,7 +658,45 @@ def get_dnsdumpster_enrichment(
                         "Source": url,
                     }
                 )
-    return names, rows
+    return names, rows, dns_rows, rate_limit_from_headers(headers)
+
+
+def consolidate_dns_records(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fusionne les observations DNS identiques provenant de plusieurs sources.
+
+    Les lignes présentes priment sur les lignes ``Absent`` pour un même contrôle.
+    Lorsqu'une même valeur est vue par Google et DNSDumpster, leurs noms sont
+    réunis dans la colonne ``Source``.
+    """
+    present_checks = {
+        (row["Domaine"], row["NomInterroge"], row["TypeDNS"], row["Categorie"])
+        for row in rows
+        if row.get("Statut") == "Présent"
+    }
+    merged: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        check_key = (
+            row["Domaine"], row["NomInterroge"], row["TypeDNS"], row["Categorie"]
+        )
+        if row.get("Statut") != "Présent" and check_key in present_checks:
+            continue
+        normalized_value = str(row.get("Valeur") or "").strip().strip('"').rstrip(".").lower()
+        key = (*check_key, normalized_value)
+        if key not in merged:
+            merged[key] = dict(row)
+            continue
+        sources = set(str(merged[key].get("Source") or "").split(" + "))
+        sources.update(str(row.get("Source") or "").split(" + "))
+        merged[key]["Source"] = " + ".join(sorted(source for source in sources if source))
+        if not merged[key].get("TTL") and row.get("TTL"):
+            merged[key]["TTL"] = row["TTL"]
+    return sorted(
+        merged.values(),
+        key=lambda row: (
+            row["Domaine"], row["NomInterroge"], row["TypeDNS"],
+            row["Categorie"], row["Valeur"],
+        ),
+    )
 
 
 def resolve_name(name: str) -> dict[str, Any]:
@@ -729,7 +891,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--dnsdumpster-state-file",
-        default=str(Path(__file__).with_name(".dnsdumpster-usage.json")),
+        default=str(default_state_directory() / "dnsdumpster-usage.json"),
         help="Fichier local persistant du compteur DNSDumpster",
     )
     parser.add_argument(
@@ -746,7 +908,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--whois-state-file",
-        default=str(Path(__file__).with_name(".whois-usage.json")),
+        default=str(default_state_directory() / "whois-usage.json"),
         help="Fichier local persistant du compteur who.is",
     )
     args = parser.parse_args()
@@ -783,12 +945,18 @@ def main() -> int:
     dnsdumpster_rows: list[dict[str, Any]] = []
     domain_dns_rows: list[dict[str, Any]] = []
     discovered_by_root: dict[str, dict[str, set[str]]] = {}
-    dnsdumpster_state_file = Path(args.dnsdumpster_state_file).expanduser().resolve()
+    dnsdumpster_state_file = prepare_state_file(
+        Path(args.dnsdumpster_state_file).expanduser().resolve(),
+        "dnsdumpster-usage.json",
+    )
     dnsdumpster_usage = load_dnsdumpster_usage(
         dnsdumpster_state_file, args.dnsdumpster_today_count
     )
     dnsdumpster_skipped_quota = 0
-    whois_state_file = Path(args.whois_state_file).expanduser().resolve()
+    whois_state_file = prepare_state_file(
+        Path(args.whois_state_file).expanduser().resolve(),
+        "whois-usage.json",
+    )
     whois_usage = load_whois_usage(whois_state_file, args.whois_month_count)
     whois_skipped_quota = 0
     dkim_selectors = tuple(
@@ -836,11 +1004,19 @@ def main() -> int:
             save_whois_usage(
                 whois_state_file, whois_usage, args.whois_monthly_quota
             )
-            whois_data, contact_rows = get_whois_enrichment(
+            whois_data, contact_rows, whois_rate = get_whois_enrichment(
                 # Pas de reprise automatique : une nouvelle tentative pourrait
                 # consommer un crédit supplémentaire.
                 root, whois_api_key, 1, args.delay
             )
+            # who.is documente ces en-têtes sur chaque réponse. Ils remplacent
+            # le compteur estimé dès qu'ils sont disponibles.
+            if "limit" in whois_rate and "remaining" in whois_rate:
+                args.whois_monthly_quota = whois_rate["limit"]
+                whois_usage = max(0, whois_rate["limit"] - whois_rate["remaining"])
+                save_whois_usage(
+                    whois_state_file, whois_usage, args.whois_monthly_quota
+                )
             whois_queried = True
             whois_contact_rows.extend(contact_rows)
             # Limite officielle du plan Free : une requête par seconde.
@@ -901,14 +1077,32 @@ def main() -> int:
                 dnsdumpster_usage,
                 args.dnsdumpster_daily_quota,
             )
-            dumpster_names, dumpster_records = get_dnsdumpster_enrichment(
+            (
+                dumpster_names,
+                dumpster_records,
+                dumpster_dns_records,
+                dumpster_rate,
+            ) = get_dnsdumpster_enrichment(
                 # Pas de reprise automatique pour cette source : une nouvelle
                 # tentative pourrait consommer une unité de quota supplémentaire.
                 root, dnsdumpster_api_key, 1, args.delay
             )
+            # DNSDumpster ne documente pas d'endpoint de compteur. Si l'API
+            # fournit néanmoins des en-têtes standards, ils sont prioritaires.
+            if "limit" in dumpster_rate and "remaining" in dumpster_rate:
+                args.dnsdumpster_daily_quota = dumpster_rate["limit"]
+                dnsdumpster_usage = max(
+                    0, dumpster_rate["limit"] - dumpster_rate["remaining"]
+                )
+                save_dnsdumpster_usage(
+                    dnsdumpster_state_file,
+                    dnsdumpster_usage,
+                    args.dnsdumpster_daily_quota,
+                )
             for name in dumpster_names:
                 source_map.setdefault(name, set()).add("DNSDumpster")
             dnsdumpster_rows.extend(dumpster_records)
+            domain_dns_rows.extend(dumpster_dns_records)
             # Limite officielle : au plus une requête toutes les deux secondes.
             time.sleep(max(2.0, args.delay))
         elif dnsdumpster_api_key:
@@ -934,6 +1128,9 @@ def main() -> int:
             )
         )
         time.sleep(args.delay)
+
+    # Les observations Google et DNSDumpster sont regroupées dans une même table.
+    domain_dns_rows = consolidate_dns_records(domain_dns_rows)
 
     # Un nom peut appartenir à plusieurs domaines demandés (cas de listes
     # redondantes). Cette table permet une seule résolution DNS par nom unique.

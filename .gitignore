@@ -6,6 +6,7 @@
 *.pem
 .dnsdumpster-usage.json
 .whois-usage.json
+.domain-inventory-state/
 
 # Résultats produits par le script
 domain-inventory-*/

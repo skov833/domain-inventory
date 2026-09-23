@@ -54,9 +54,11 @@ La configuration par défaut correspond au compte communiqué :
 - quota quotidien : `50` ;
 - cadence maximale : une requête toutes les deux secondes.
 
-Le script conserve le compteur dans `.dnsdumpster-usage.json`, à côté du script.
-Ce fichier ne contient ni clé API ni domaine. Le compteur est réinitialisé
-automatiquement au changement de date. Lorsqu'il atteint 50, la collecte continue
+Le script conserve le compteur dans un dossier d'état stable, indépendant du
+script et des résultats. Sous Windows, le chemin par défaut est
+`%LOCALAPPDATA%\DomainInventory\dnsdumpster-usage.json`. Ce fichier ne contient
+ni clé API ni domaine. Le compteur est réinitialisé automatiquement au changement
+de date. Lorsqu'il atteint 50, la collecte continue
 avec les autres sources, mais DNSDumpster est ignoré pour les domaines restants.
 Les reprises HTTP automatiques sont désactivées pour DNSDumpster afin qu'une
 erreur ne déclenche pas plusieurs requêtes susceptibles de consommer le quota.
@@ -86,8 +88,9 @@ Le plan gratuit who.is est géré selon ses limites officielles actuelles :
 - cadence maximale : une requête par seconde ;
 - aucun rafraîchissement `live=true`, réservé aux crédits payants.
 
-Le compteur est conservé dans `.whois-usage.json`, à côté du script, et se
-réinitialise automatiquement au changement de mois UTC. Ce fichier ne contient
+Le compteur est conservé dans
+`%LOCALAPPDATA%\DomainInventory\whois-usage.json` sous Windows et se réinitialise
+automatiquement au changement de mois UTC. Ce fichier ne contient
 ni clé API ni domaine. Une fois les 500 crédits comptabilisés, who.is est ignoré
 pour les domaines restants et toutes les autres sources continuent normalement.
 
@@ -109,6 +112,17 @@ python .\domain_inventory.py `
 Le script retient la valeur la plus élevée entre le compteur déclaré et son état
 local. Les options `--whois-monthly-quota` et `--whois-state-file` permettent
 d'adapter ultérieurement le plan ou l'emplacement du fichier d'état.
+
+Après chaque réponse who.is, le script lit `X-RateLimit-Limit`,
+`X-RateLimit-Remaining` et `X-Credits-Charged`, puis remplace son estimation par
+le compteur réel communiqué par l'API. DNSDumpster ne documente actuellement ni
+endpoint de consultation du compteur ni en-têtes de quota ; le script exploite
+les en-têtes standards s'ils sont présents, sinon son fichier d'état persistant
+reste la référence. Aucun scraping du tableau de bord n'est effectué.
+
+Si le dossier d'état système est inaccessible, le script se replie sur
+`.domain-inventory-state` dans le dossier courant et affiche un avertissement,
+au lieu d'interrompre le traitement.
 
 Avec 400 domaines et aucun crédit déjà consommé, les consultations WHOIS du lot
 utilisent au maximum 400 des 500 crédits mensuels du plan Free.
@@ -167,7 +181,10 @@ confirmé tant qu'un contrôle applicatif autorisé n'a pas été effectué.
 - `contacts-rdap.csv` : détail des entités RDAP publiques, y compris les rôles `administrative`, `billing`, `technical`, `registrant`, `abuse`, `registrar` ou `reseller` lorsqu'ils sont publiés. Les entités imbriquées sont également parcourues.
 - `contacts-whois.csv` : contacts WHOIS normalisés renvoyés par l'API who.is, lorsque cette source est activée.
 - `dnsdumpster.csv` : hôtes, IP, PTR, ASN, propriétaire réseau et pays renvoyés par DNSDumpster. Les hôtes trouvés sont fusionnés avec ceux de `crt.sh` avant résolution DNS.
-- `enregistrements-dns.csv` : résultats MX, TXT/SPF, CNAME, AAAA, DMARC et DKIM, y compris les contrôles sans réponse.
+- `enregistrements-dns.csv` : résultats consolidés de Google Public DNS et
+  DNSDumpster pour MX, TXT/SPF, NS, CNAME, AAAA, DMARC et DKIM. Une même valeur
+  vue par les deux sources n'apparaît qu'une fois et la colonne `Source` mentionne
+  les deux fournisseurs.
 - `sous-domaines-dns.csv` : noms vus dans les journaux de certificats, enregistrements A/AAAA et statut de résolution.
 - `adresses-ip.csv` : ASN, opérateur réseau, organisation, pays, attribution probable et indicateur de CDN/proxy.
 - `resume.json` : volume traité, date d'exécution et limites méthodologiques.
