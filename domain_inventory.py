@@ -514,6 +514,7 @@ def get_whois_enrichment(
                 rows.append(
                     {
                         "Domaine": domain,
+                        "SourceType": "WHOIS",
                         "Role": role,
                         "Nom": contact.get("name") or "",
                         "Organisation": contact.get("organization") or "",
@@ -530,6 +531,85 @@ def get_whois_enrichment(
                         "Source": url,
                     }
                 )
+    return data, rows, rate_limit_from_headers(headers)
+
+
+def walk_whois_rdap_entities(
+    entities: Iterable[dict[str, Any]],
+) -> Iterable[dict[str, Any]]:
+    """Parcourt les entités RDAP normalisées de who.is et leurs enfants."""
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        yield entity
+        yield from walk_whois_rdap_entities(entity.get("child_entities") or [])
+
+
+def whois_rdap_entity_summary(entity: dict[str, Any]) -> str:
+    """Formate les coordonnées publiques d'une entité RDAP normalisée who.is."""
+    values = [
+        entity.get("fn"),
+        entity.get("org"),
+        entity.get("email"),
+        entity.get("tel"),
+        entity.get("country_code"),
+        f"handle={entity['handle']}" if entity.get("handle") else "",
+    ]
+    return " | ".join(dict.fromkeys(str(value) for value in values if value))
+
+
+def whois_rdap_role_summary(
+    data: dict[str, Any], aliases: Iterable[str]
+) -> str:
+    """Synthétise les entités RDAP who.is correspondant à un rôle."""
+    expected = {alias.lower() for alias in aliases}
+    summaries: list[str] = []
+    for entity in walk_whois_rdap_entities(data.get("entities") or []):
+        roles = {str(role).lower() for role in (entity.get("roles") or [])}
+        if roles.intersection(expected):
+            summaries.append(
+                whois_rdap_entity_summary(entity) or "Rôle présent, détails masqués"
+            )
+    return " ; ".join(dict.fromkeys(summaries)) if summaries else "Non publié par who.is RDAP"
+
+
+def get_whois_rdap_enrichment(
+    domain: str, api_key: str, retries: int, delay: float
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, int]]:
+    """Interroge l'endpoint RDAP normalisé de who.is et extrait ses entités."""
+    url = f"https://api.who.is/v1/rdap/{urllib.parse.quote(domain)}"
+    data, headers, _ = http_json_response(
+        url,
+        retries,
+        delay,
+        "who.is RDAP",
+        {"Authorization": f"Bearer {api_key}"},
+    )
+    data = data or {}
+    rows: list[dict[str, Any]] = []
+    for entity in walk_whois_rdap_entities(data.get("entities") or []):
+        roles = ", ".join(sorted(entity.get("roles") or [])) or "non précisé"
+        rows.append(
+            {
+                "Domaine": domain,
+                "SourceType": "RDAP",
+                "Role": roles,
+                "Nom": entity.get("fn") or "",
+                "Organisation": entity.get("org") or "",
+                "Email": entity.get("email") or "",
+                "Telephone": entity.get("tel") or "",
+                "Fax": "",
+                "Rue": entity.get("address") or "",
+                "Ville": "",
+                "Region": "",
+                "CodePostal": "",
+                "Pays": entity.get("country_code") or "",
+                "Handle": entity.get("handle") or "",
+                "IdentifiantPublicType": entity.get("public_id_type") or "",
+                "IdentifiantPublic": entity.get("public_id") or "",
+                "Source": url,
+            }
+        )
     return data, rows, rate_limit_from_headers(headers)
 
 
@@ -911,6 +991,15 @@ def main() -> int:
         default=str(default_state_directory() / "whois-usage.json"),
         help="Fichier local persistant du compteur who.is",
     )
+    parser.add_argument(
+        "--whois-source",
+        choices=("whois", "rdap", "both"),
+        default="whois",
+        help=(
+            "Endpoint(s) who.is à utiliser: whois (1 crédit/domaine), "
+            "rdap (1 crédit/domaine) ou both (2 crédits/domaine)"
+        ),
+    )
     args = parser.parse_args()
 
     # Les clés sont lues dans l'environnement pour éviter leur présence dans le
@@ -996,39 +1085,60 @@ def main() -> int:
         rdap_url = f"https://rdap.org/domain/{urllib.parse.quote(root)}"
         rdap = http_json(rdap_url, args.retries, args.delay, "RDAP domaine")
         whois_data: dict[str, Any] = {}
+        whois_rdap_data: dict[str, Any] = {}
         whois_queried = False
-        if whois_api_key and whois_usage < args.whois_monthly_quota:
-            # Chaque consultation WHOIS standard coûte un crédit. Le compteur
-            # est persisté avant l'appel pour survivre à une interruption.
-            whois_usage += 1
-            save_whois_usage(
-                whois_state_file, whois_usage, args.whois_monthly_quota
-            )
-            whois_data, contact_rows, whois_rate = get_whois_enrichment(
-                # Pas de reprise automatique : une nouvelle tentative pourrait
-                # consommer un crédit supplémentaire.
-                root, whois_api_key, 1, args.delay
-            )
-            # who.is documente ces en-têtes sur chaque réponse. Ils remplacent
-            # le compteur estimé dès qu'ils sont disponibles.
-            if "limit" in whois_rate and "remaining" in whois_rate:
-                args.whois_monthly_quota = whois_rate["limit"]
-                whois_usage = max(0, whois_rate["limit"] - whois_rate["remaining"])
+        whois_rdap_queried = False
+        requested_whois_sources = (
+            ("whois", "rdap") if args.whois_source == "both"
+            else (args.whois_source,)
+        )
+        if whois_api_key:
+            for selected_source in requested_whois_sources:
+                if whois_usage >= args.whois_monthly_quota:
+                    whois_skipped_quota += 1
+                    if whois_skipped_quota == 1:
+                        print(
+                            "AVERTISSEMENT: quota mensuel who.is atteint; les "
+                            "appels who.is restants sont ignorés.",
+                            file=sys.stderr,
+                        )
+                    continue
+
+                # Chaque lookup WHOIS ou RDAP coûte un crédit. Le compteur est
+                # persisté avant l'appel pour survivre à une interruption.
+                whois_usage += 1
                 save_whois_usage(
                     whois_state_file, whois_usage, args.whois_monthly_quota
                 )
-            whois_queried = True
-            whois_contact_rows.extend(contact_rows)
-            # Limite officielle du plan Free : une requête par seconde.
-            time.sleep(max(1.0, args.delay))
-        elif whois_api_key:
-            whois_skipped_quota += 1
-            if whois_skipped_quota == 1:
-                print(
-                    "AVERTISSEMENT: quota mensuel who.is atteint; cette source "
-                    "est ignorée pour les domaines restants.",
-                    file=sys.stderr,
-                )
+                if selected_source == "whois":
+                    whois_data, contact_rows, whois_rate = get_whois_enrichment(
+                        root, whois_api_key, 1, args.delay
+                    )
+                    whois_queried = True
+                else:
+                    (
+                        whois_rdap_data,
+                        contact_rows,
+                        whois_rate,
+                    ) = get_whois_rdap_enrichment(
+                        root, whois_api_key, 1, args.delay
+                    )
+                    whois_rdap_queried = True
+                whois_contact_rows.extend(contact_rows)
+
+                # Les en-têtes officiels remplacent l'estimation locale.
+                if "limit" in whois_rate and "remaining" in whois_rate:
+                    args.whois_monthly_quota = whois_rate["limit"]
+                    whois_usage = max(
+                        0, whois_rate["limit"] - whois_rate["remaining"]
+                    )
+                    save_whois_usage(
+                        whois_state_file,
+                        whois_usage,
+                        args.whois_monthly_quota,
+                    )
+                # Limite du plan Free : une requête par seconde.
+                time.sleep(max(1.0, args.delay))
         nameservers = sorted(
             ns.get("ldhName", "") for ns in (rdap or {}).get("nameservers", []) if ns.get("ldhName")
         )
@@ -1055,9 +1165,34 @@ def main() -> int:
                     "Source who.is non interrogée (quota atteint)"
                     if whois_api_key else "Source who.is désactivée"
                 ),
+                "ContactAdministratifWhoisRdap": whois_rdap_role_summary(
+                    whois_rdap_data, ("administrative", "admin")
+                ) if whois_rdap_queried else (
+                    "Mode RDAP who.is non sélectionné"
+                    if args.whois_source == "whois"
+                    else (
+                        "Source who.is RDAP non interrogée (quota atteint)"
+                        if whois_api_key else "Source who.is désactivée"
+                    )
+                ),
+                "ContactFacturationWhoisRdap": whois_rdap_role_summary(
+                    whois_rdap_data, ("billing", "bill")
+                ) if whois_rdap_queried else (
+                    "Mode RDAP who.is non sélectionné"
+                    if args.whois_source == "whois"
+                    else (
+                        "Source who.is RDAP non interrogée (quota atteint)"
+                        if whois_api_key else "Source who.is désactivée"
+                    )
+                ),
                 "ContactsPublics": rdap_contacts(rdap),
                 "RegistrarWhois": whois_data.get("registrar") or "",
                 "InstantaneWhois": whois_data.get("snapshot_time") or "",
+                "RegistrarWhoisRdap": whois_rdap_role_summary(
+                    whois_rdap_data, ("registrar",)
+                ) if whois_rdap_queried else "",
+                "InstantaneWhoisRdap": whois_rdap_data.get("snapshot_time") or "",
+                "RessourceWhoisRdap": whois_rdap_data.get("resource_url") or "",
                 "Source": rdap_url,
             }
         )
@@ -1223,16 +1358,19 @@ def main() -> int:
     write_csv(output / "domaines.csv", domain_rows, [
         "Domaine", "Registrar", "Creation", "Expiration", "DerniereModification",
         "Statuts", "ServeursDNS", "ContactAdministratif", "ContactFacturation",
-        "ContactAdministratifWhois", "ContactFacturationWhois", "ContactsPublics",
-        "RegistrarWhois", "InstantaneWhois", "Source",
+        "ContactAdministratifWhois", "ContactFacturationWhois",
+        "ContactAdministratifWhoisRdap", "ContactFacturationWhoisRdap",
+        "ContactsPublics", "RegistrarWhois", "InstantaneWhois",
+        "RegistrarWhoisRdap", "InstantaneWhoisRdap", "RessourceWhoisRdap", "Source",
     ])
     write_csv(output / "contacts-rdap.csv", rdap_contact_rows, [
         "Domaine", "Roles", "Handle", "Nom", "Organisation", "Emails",
         "Telephones", "Adresse", "Statuts", "Port43", "LienRdap",
     ])
     write_csv(output / "contacts-whois.csv", whois_contact_rows, [
-        "Domaine", "Role", "Nom", "Organisation", "Email", "Telephone", "Fax",
-        "Rue", "Ville", "Region", "CodePostal", "Pays", "Source",
+        "Domaine", "SourceType", "Role", "Nom", "Organisation", "Email",
+        "Telephone", "Fax", "Rue", "Ville", "Region", "CodePostal", "Pays",
+        "Handle", "IdentifiantPublicType", "IdentifiantPublic", "Source",
     ])
     write_csv(output / "dnsdumpster.csv", dnsdumpster_rows, [
         "DomaineRacine", "Type", "Hote", "IP", "PTR", "ASN", "ProprietaireASN",
@@ -1271,6 +1409,7 @@ def main() -> int:
         "dnsdumpster_state_file": str(dnsdumpster_state_file),
         "who_is_active": bool(whois_api_key),
         "who_is_account": "Free" if whois_api_key else None,
+        "who_is_mode": args.whois_source,
         "who_is_monthly_quota": args.whois_monthly_quota,
         "who_is_month_count_final": whois_usage,
         "who_is_remaining": max(0, args.whois_monthly_quota - whois_usage),

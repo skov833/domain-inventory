@@ -127,6 +127,34 @@ au lieu d'interrompre le traitement.
 Avec 400 domaines et aucun crédit déjà consommé, les consultations WHOIS du lot
 utilisent au maximum 400 des 500 crédits mensuels du plan Free.
 
+### Choix de la source who.is
+
+L'option `--whois-source` contrôle l'endpoint who.is utilisé :
+
+- `whois` — valeur par défaut : `/v1/whois/{domain}`, un crédit par domaine ;
+- `rdap` — `/v1/rdap/{domain}`, un crédit par domaine ;
+- `both` — appelle WHOIS puis RDAP, deux crédits par domaine si le quota le permet.
+
+Exemples :
+
+```powershell
+# Contacts WHOIS normalisés, adapté à 400 domaines sur le plan Free
+python .\domain_inventory.py --input .\domaines.txt --whois-source whois
+
+# Entités RDAP normalisées, y compris les child_entities
+python .\domain_inventory.py --input .\domaines.txt --whois-source rdap
+
+# Les deux sources, à réserver à un lot compatible avec le solde disponible
+python .\domain_inventory.py --input .\domaines.txt --whois-source both
+```
+
+En mode `both`, le script vérifie le solde avant chaque endpoint : il peut donc
+exécuter le WHOIS et ignorer le RDAP du même domaine si le dernier crédit
+disponible a été consommé entre les deux. Le fichier `contacts-whois.csv`
+distingue les lignes avec la colonne `SourceType` (`WHOIS` ou `RDAP`). Les
+colonnes `Handle`, `IdentifiantPublicType` et `IdentifiantPublic` sont alimentées
+par les entités RDAP who.is lorsqu'elles sont publiées.
+
 Pour un seul domaine :
 
 ```powershell
