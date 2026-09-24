@@ -7,9 +7,9 @@ Documentation française : [README.md](README.md). Script français :
 and network-operator information. It can optionally run a bounded TCP connect
 Nmap scan against discovered IP addresses.
 
-Keep `output_merge.py` in the same directory as `domain_inventory.py` and
-`domain_inventory_en.py`. Both main scripts import this module for atomic CSV
-writes and historical merging.
+Keep `output_merge.py` and `global_output.py` in the same directory as
+`domain_inventory.py` and `domain_inventory_en.py`. Both main scripts import
+these modules for historical merging and the global view.
 
 The French and English scripts provide the same collection features and accept
 the same command-line options. The English version keeps the established CSV
@@ -97,7 +97,7 @@ Useful options include `--workers 12`, `--delay 0.35`, and `--retries 3`.
 
 ## Overwrite or merge results
 
-The default behavior still replaces all eight CSV files:
+The default behavior still replaces all eight source CSV files:
 
 ```bash
 python3 ./domain_inventory_en.py --input ./domains.txt --output ./results --output-mode overwrite
@@ -122,7 +122,7 @@ Merge mode:
   contains duplicate rows;
 - atomically replaces CSV files and `resume.json` after writing temporary files.
 
-Three columns are appended to every CSV in both modes:
+Three columns are appended to every source CSV in both modes:
 
 - `PremiereObservation`: UTC timestamp of the first observation;
 - `DerniereObservation`: UTC timestamp of the latest run that found the item;
@@ -325,12 +325,22 @@ target. "Low impact" does not mean invisible.
 - `sous-domaines-dns.csv`: discovered/tested names and A/AAAA resolution;
 - `adresses-ip.csv`: ASN, operator, country, and probable hosting attribution;
 - `nmap.csv`: bounded TCP port results when Nmap is enabled;
+- `inventaire-global.csv`: denormalized view combining root domain, registrar,
+  who.is administrative contacts, subdomains, IP attribution, and Nmap ports.
+  Each row represents a domain, subdomain, type, IP, and port combination;
 - `resume.json`: execution counts, quota state, and methodological warnings.
 
 CSV files use semicolons and UTF-8 with BOM for spreadsheet compatibility. The
 English script intentionally preserves the established French filenames and
 column identifiers so both language versions can feed the same downstream
 processing.
+
+`inventaire-global.csv` contains: `DomaineRacine`, `Registrar`,
+`ContactAdministratif`, `SousDomaine`, `Type`, `Resolu`,
+`SourceSousDomaine`, `AdresseIP`, `Organisation`, `ISP`,
+`HebergeurProbable`, `CDNouProxy`, `SourceAttribution`, `HoteEtat`, `Port`, and
+`Etat`. Contacts carrying the `admin` or `administrative` role are deduplicated
+and concatenated as `Name | Organization | Email | Phone`.
 
 ## Generate a complete HTML report
 
@@ -364,7 +374,7 @@ The report includes:
 - execution overview cards;
 - availability status for every expected file;
 - every field from `resume.json`;
-- every row from all eight CSV files;
+- every row from all nine CSV files;
 - the number of observed open Nmap ports;
 - methodological and hosting-attribution warnings.
 

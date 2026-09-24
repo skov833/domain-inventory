@@ -27,6 +27,7 @@ EXPECTED_FILES = (
     "sous-domaines-dns.csv",
     "adresses-ip.csv",
     "nmap.csv",
+    "inventaire-global.csv",
 )
 
 TEXT = {
@@ -64,6 +65,7 @@ TEXT = {
             "sous-domaines-dns.csv": "Sous-domaines et résolution DNS",
             "adresses-ip.csv": "Adresses IP et hébergeurs probables",
             "nmap.csv": "Analyse Nmap limitée",
+            "inventaire-global.csv": "Inventaire global consolidé",
         },
         "descriptions": {
             "domaines.csv": "Registrar, dates, statuts, serveurs DNS et synthèses de contacts.",
@@ -74,6 +76,7 @@ TEXT = {
             "sous-domaines-dns.csv": "Noms découverts ou testés, adresses résolues et indicateur wildcard.",
             "adresses-ip.csv": "ASN, opérateur, pays et attribution probable de l’hébergement.",
             "nmap.csv": "États des ports du scan TCP connect borné, lorsqu’il était activé.",
+            "inventaire-global.csv": "Vue dénormalisée par domaine, sous-domaine, IP et port Nmap.",
         },
         "notice": (
             "Les informations proviennent de sources publiques et peuvent être incomplètes, "
@@ -115,6 +118,7 @@ TEXT = {
             "sous-domaines-dns.csv": "Subdomains and DNS resolution",
             "adresses-ip.csv": "IP addresses and probable hosting providers",
             "nmap.csv": "Bounded Nmap analysis",
+            "inventaire-global.csv": "Consolidated global inventory",
         },
         "descriptions": {
             "domaines.csv": "Registrar, dates, statuses, name servers, and contact summaries.",
@@ -125,6 +129,7 @@ TEXT = {
             "sous-domaines-dns.csv": "Discovered or tested names, resolved addresses, and wildcard indicator.",
             "adresses-ip.csv": "ASN, operator, country, and probable hosting attribution.",
             "nmap.csv": "Port states from the bounded TCP connect scan, when enabled.",
+            "inventaire-global.csv": "Denormalized view by domain, subdomain, IP address, and Nmap port.",
         },
         "notice": (
             "Information comes from public sources and may be incomplete, redacted, or stale. "

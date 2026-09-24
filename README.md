@@ -7,9 +7,9 @@ Le script `domain_inventory.py` collecte des informations publiques et peut,
 sur demande explicite, lancer un scan Nmap TCP limité. Sa configuration peut
 être externalisée dans un fichier YAML.
 
-Conservez `output_merge.py` dans le même dossier que `domain_inventory.py` et
-`domain_inventory_en.py` : les deux scripts principaux importent ce module pour
-l'écriture atomique et la fusion historique des CSV.
+Conservez `output_merge.py` et `global_output.py` dans le même dossier que
+`domain_inventory.py` et `domain_inventory_en.py` : les deux scripts principaux
+importent ces modules pour la fusion historique et la vue globale.
 
 ## Prérequis
 
@@ -335,7 +335,7 @@ Options utiles : `--workers 12`, `--delay 0.35` et `--retries 3`. Pour 400 domai
 
 ### Remplacement ou fusion des résultats
 
-Le comportement par défaut reste le remplacement complet des huit CSV :
+Le comportement par défaut reste le remplacement complet des huit CSV sources :
 
 ```powershell
 python .\domain_inventory.py --input .\domaines.txt --output .\resultats --output-mode overwrite
@@ -362,7 +362,7 @@ Le mode `merge` :
   courante contient plusieurs doublons ;
 - écrit les CSV et `resume.json` par remplacement atomique.
 
-Trois colonnes sont ajoutées à chacun des huit CSV, dans les deux modes :
+Trois colonnes sont ajoutées à chacun des huit CSV sources, dans les deux modes :
 
 - `PremiereObservation` : date UTC de la première observation ;
 - `DerniereObservation` : date UTC de la dernière exécution ayant retrouvé
@@ -498,9 +498,20 @@ propriétaire et exposerait inutilement les clés au processus privilégié.
   table Nmap ; aucune détection de version n'est effectuée.
 - `sous-domaines-dns.csv` : noms vus dans les journaux de certificats, enregistrements A/AAAA et statut de résolution.
 - `adresses-ip.csv` : ASN, opérateur réseau, organisation, pays, attribution probable et indicateur de CDN/proxy.
+- `inventaire-global.csv` : vue dénormalisée consolidant domaine racine,
+  registrar, contacts administratifs who.is, sous-domaines, IP, attribution
+  réseau et ports Nmap. Une ligne correspond à une combinaison domaine,
+  sous-domaine, type, IP et port.
 - `resume.json` : volume traité, date d'exécution et limites méthodologiques.
 
 Les CSV sont encodés en UTF-8 avec BOM et utilisent le point-virgule, pour une ouverture simple dans Excel en environnement français.
+
+Les colonnes de `inventaire-global.csv` sont : `DomaineRacine`, `Registrar`,
+`ContactAdministratif`, `SousDomaine`, `Type`, `Resolu`,
+`SourceSousDomaine`, `AdresseIP`, `Organisation`, `ISP`,
+`HebergeurProbable`, `CDNouProxy`, `SourceAttribution`, `HoteEtat`, `Port` et
+`Etat`. Les contacts de rôle `admin` ou `administrative` sont dédupliqués et
+concaténés sous la forme `Nom | Organisation | Email | Téléphone`.
 
 ## Générer un rapport HTML complet
 
@@ -534,7 +545,7 @@ Le rapport contient :
 - une synthèse chiffrée de l'exécution ;
 - l'état de présence de chaque fichier attendu ;
 - tous les champs de `resume.json` ;
-- l'intégralité des lignes de chacun des huit CSV ;
+- l'intégralité des lignes des neuf CSV ;
 - le nombre de ports Nmap ouverts observés ;
 - les limites méthodologiques et les avertissements d'attribution.
 

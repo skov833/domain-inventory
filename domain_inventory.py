@@ -8,7 +8,7 @@ Le programme prend un ou plusieurs domaines en entrée et exécute quatre étape
 3. résolution DNS A/AAAA des noms trouvés ;
 4. attribution des IP à un ASN et à un opérateur apparent.
 
-Les résultats sont écrits dans huit CSV et un résumé JSON. Le script utilise
+Les résultats sont écrits dans neuf CSV et un résumé JSON. Le script utilise
 PyYAML pour sa configuration. Il n'effectue aucun brute force DNS. Un scan Nmap
 TCP borné peut être activé explicitement avec ``--nmap`` ; il reste désactivé
 par défaut.
@@ -40,6 +40,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from global_output import build_global_rows, write_global_csv
 from output_merge import write_inventory_csv, write_json_atomic
 
 try:
@@ -1739,6 +1740,10 @@ def main() -> int:
         "IP", "HoteEtat", "Protocole", "Port", "Etat", "Raison",
         "ServiceIndicatif", "Analyse",
     ], ("IP", "Protocole", "Port"), args.output_mode, execution_utc)
+    global_rows = build_global_rows(
+        domain_rows, whois_contact_rows, dns_rows, ip_rows, nmap_rows
+    )
+    write_global_csv(output / "inventaire-global.csv", global_rows)
 
     summary = {
         "execution_utc": execution_utc,
@@ -1753,6 +1758,7 @@ def main() -> int:
         "nmap_max_ips": args.nmap_max_ips if args.nmap else 0,
         "nmap_include_private": bool(args.nmap_include_private) if args.nmap else False,
         "nmap_resultats": len(nmap_rows),
+        "inventaire_global_lignes": len(global_rows),
         "services_externes": ["rdap.org", "crt.sh", "ipwho.is", "dns.google"]
         + (["dnsdumpster.com"] if dnsdumpster_api_key else [])
         + (["who.is"] if whois_api_key else []),
